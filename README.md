@@ -57,7 +57,11 @@ Published on npm now:
 - `@contextsdk/adapter-vercel@0.1.0`
 - `@contextsdk/adapter-modal@0.1.0`
 
-The CLI package is prepared as `@contextsdk/cli@0.1.0`, but it is not published yet. Use the local workspace CLI until `npm view @contextsdk/cli version` succeeds.
+Prepared but not currently installable from npm:
+
+- `@contextsdk/cli@0.1.0`
+
+npm accepted the CLI publish and reports the `latest` dist-tag, but public `npm view` and install still return 404. Until that registry state resolves, use the built local CLI from this checkout.
 
 Local development:
 

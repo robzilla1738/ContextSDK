@@ -76,11 +76,11 @@ Published on npm:
 - `@contextsdk/adapter-vercel@0.1.0`
 - `@contextsdk/adapter-modal@0.1.0`
 
-Prepared but not yet published:
+Prepared but not currently installable from npm:
 
 - `@contextsdk/cli@0.1.0`
 
-The CLI package is publish-ready, but npm required another OTP or a granular token that can create/publish `@contextsdk/cli`.
+npm accepted the CLI publish and reports the `latest` dist-tag, but public `npm view` and install still return 404. Keep docs honest until user install verification succeeds.
 
 ## Commands
 
@@ -115,7 +115,7 @@ If npm asks for MFA, do not put tokens or recovery codes in shell command histor
 ## Documentation Rules
 
 - Keep `README.md`, package READMEs, examples, and `docs/enterprise-rollout.md` consistent.
-- Do not claim the CLI is published until `npm view @contextsdk/cli version` succeeds.
+- Keep published package status aligned with install verification and release notes.
 - When changing runtime persistence behavior, update the two-layer state explanation.
 - When changing default persisted roots or exclude patterns, update docs and tests together.
 

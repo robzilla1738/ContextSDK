@@ -102,8 +102,8 @@ Published on npm:
 - `@contextsdk/adapter-vercel@0.1.0`
 - `@contextsdk/adapter-modal@0.1.0`
 
-Prepared but not yet published:
+Prepared but not currently installable from npm:
 
 - `@contextsdk/cli@0.1.0`
 
-The CLI package is ready, but npm still requires a fresh OTP or a granular token with permission to create/publish `@contextsdk/cli`.
+npm accepted the CLI publish and reports the `latest` dist-tag, but public `npm view` and install still return 404. Use the local built CLI until npm registry state is corrected.
