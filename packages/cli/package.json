@@ -2,9 +2,30 @@
   "name": "@contextsdk/cli",
   "version": "0.1.0",
   "description": "CLI for portable encrypted context state",
+  "license": "MIT",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/robzilla1738/ContextSDK.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/robzilla1738/ContextSDK#readme",
+  "bugs": {
+    "url": "https://github.com/robzilla1738/ContextSDK/issues"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "sandbox",
+    "filesystem",
+    "persistence",
+    "cli"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
-    "contextsdk": "./dist/cli.js"
+    "contextsdk": "dist/cli.js"
   },
   "exports": {
     ".": {
@@ -13,7 +34,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
