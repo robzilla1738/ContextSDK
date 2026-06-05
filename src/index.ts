@@ -4,6 +4,7 @@ export * from "./config.js";
 export * from "./enterprise.js";
 export * from "./errors.js";
 export * from "./file-manager.js";
+export * from "./fs-storage.js";
 export * from "./local-image.js";
 export * from "./lock.js";
 export * from "./path-policy.js";

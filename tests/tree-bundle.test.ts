@@ -130,7 +130,7 @@ describe("tree bundles", () => {
       execFileSync("mkfifo", [join(src, "workspace", "pipe")]);
       const archive = await packRaw(dir, src, ["workspace"]);
 
-      await expect(assertSafeArchive(archive)).rejects.toThrow(/unsafe archive entry type/);
+      await expect(assertSafeArchive(archive)).rejects.toThrow(/unsupported archive entry type/);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -144,6 +144,29 @@ describe("tree bundles", () => {
       const unsafeZstd = join(dir, "unsafe.tar.zst");
       await prepareContextTree({ root: src, contextId: "unsafe" });
       execFileSync("tar", ["-C", src, "-s", "@workspace/README.md@../escape.md@", "-cf", unsafeTar, "workspace/README.md"]);
+      execFileSync("zstd", ["-q", "-f", unsafeTar, "-o", unsafeZstd]);
+
+      await expect(assertSafeArchive(unsafeZstd)).rejects.toThrow(/unsafe archive entry/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.runIf(canArchive && hasCommand("python3"))("rejects entries with a trailing parent-directory component", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "contextsdk-trailing-test-"));
+    try {
+      // "workspace/.." resolves to the extraction root's parent edge; tar tools
+      // normalize the name away, so craft the archive with python tarfile.
+      const unsafeTar = join(dir, "unsafe.tar");
+      const unsafeZstd = join(dir, "unsafe.tar.zst");
+      execFileSync("python3", ["-c", [
+        "import tarfile",
+        `archive = tarfile.open(${JSON.stringify(unsafeTar)}, 'w')`,
+        "info = tarfile.TarInfo('workspace/..')",
+        "info.type = tarfile.DIRTYPE",
+        "archive.addfile(info)",
+        "archive.close()",
+      ].join("\n")]);
       execFileSync("zstd", ["-q", "-f", unsafeTar, "-o", unsafeZstd]);
 
       await expect(assertSafeArchive(unsafeZstd)).rejects.toThrow(/unsafe archive entry/);

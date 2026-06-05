@@ -13,4 +13,6 @@ node packages/cli/dist/cli.js run cross-provider-demo \
   -- sh -lc 'cat /workspace/provider-hop.txt && echo "read in vercel" >> /memory/session.md'
 ```
 
-Expected result: Vercel reads state written by E2B because both providers use `current.tree.tar.zst.enc` as the portable source of truth.
+Expected result: Vercel reads state written by E2B because both providers share the same encrypted tree bundle as the portable source of truth. The bundle is stored under a generation-scoped key (`contexts/cross-provider-demo/tree/<generation>-<attempt>.tree.tar.zst.enc`) that the manifest commit points at.
+
+No S3 bucket is required: without one, the context lives in the local store at `~/.contextsdk/storage`.

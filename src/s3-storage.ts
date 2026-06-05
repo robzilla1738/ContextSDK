@@ -2,6 +2,7 @@ import {
   DeleteObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
+  ListObjectsV2Command,
   NoSuchKey,
   NotFound,
   PutObjectCommand,
@@ -89,6 +90,27 @@ export class S3Storage implements StorageAdapter {
       }
       throw error;
     }
+  }
+
+  async listObjects(prefix: string): Promise<string[]> {
+    const fullPrefix = this.key(prefix);
+    const keys: string[] = [];
+    let continuationToken: string | undefined;
+    do {
+      const response = await this.client.send(new ListObjectsV2Command({
+        Bucket: this.bucket,
+        Prefix: fullPrefix,
+        ContinuationToken: continuationToken,
+      }));
+      for (const object of response.Contents ?? []) {
+        if (object.Key) {
+          // Strip the storage prefix so callers see context-relative keys.
+          keys.push(this.prefix ? object.Key.slice(this.prefix.length + 1) : object.Key);
+        }
+      }
+      continuationToken = response.IsTruncated ? response.NextContinuationToken : undefined;
+    } while (continuationToken);
+    return keys;
   }
 
   private key(key: string): string {

@@ -16,21 +16,24 @@ Do not collapse these layers. The portable context is the cross-provider source 
 - `src/`: `@contextsdk/core` source.
 - `packages/core/`: npm package wrapper for core build output.
 - `packages/cli/`: `contextsdk` CLI package.
-- `packages/adapter-e2b/`: E2B adapter.
+- `packages/adapter-e2b/`: E2B adapter (e2b SDK v2).
 - `packages/adapter-vercel/`: Vercel Sandbox adapter.
 - `packages/adapter-modal/`: Modal adapter.
 - `examples/`: runnable scenario docs.
 - `docs/enterprise-rollout.md`: enterprise architecture and rollout guide.
-- `scripts/validate_portable_fs.py`: original E2B/ext4 validation harness.
+- `scripts/validate_portable_fs.py`: legacy E2B/ext4 validation harness (run with `python3` after `pip install e2b httpx`).
+- `.github/workflows/ci.yml`: CI (typecheck, tests, CLI smoke, pack dry-run on Node 20/22/24).
 
 ## Core Invariants
 
 - Never write secrets into repo files, logs, fixtures, docs, or artifacts.
 - Never use text APIs for raw image or bundle transfer.
-- Keep decrypted local temp files private and delete them after use.
+- Keep decrypted local temp files private and delete them after use, including when decryption fails mid-stream.
 - Enforce one active writer per context with storage-backed locks. Lock acquisition uses conditional writes (`ifNoneMatch` on create, ETag `ifMatch` on expired-lock takeover), sessions renew the lock at TTL/3, and saves assert lock ownership when an owner is known.
-- Decryption follows the parameters recorded in `EncryptionMetadata` (including scrypt params); never change defaults in a way that breaks decryption of existing bundles.
-- Reject archive entries that traverse paths, contain absolute or `..` link targets, or are special files (devices, FIFOs, sockets).
+- **Commit protocol**: bundle and image objects are written under generation-scoped, per-attempt keys (`contexts/<id>/tree/<gen>-<attempt>...`); the manifest write is the atomic commit and uses ETag compare-and-swap, with lock ownership re-asserted at the commit point. Never write current data in place at a fixed key — a crash between data and manifest writes must never strand a manifest pointing at ciphertext it cannot decrypt. Superseded data objects are garbage-collected after commit; checkpoint history is not.
+- Decryption follows the parameters recorded in `EncryptionMetadata` (including scrypt params); never change defaults in a way that breaks decryption of existing bundles. Auth tags must be exactly 16 bytes and nonces 12 bytes — metadata is attacker-influenceable and must not be able to weaken verification.
+- Reject archive entries that traverse paths (any `..` segment, including trailing), contain absolute or `..` link targets, or are special files (devices, FIFOs, sockets). Enforce this on **both** the host side (`assertSafeArchive`) and the runtime side (the python stream-validator in `unpackBundleScript`), with entry-count and decompressed-size caps.
+- Context ids are validated (`assertValidContextId`): letters/digits plus `._-`, max 200 chars. Storage keys embed the raw id.
 - Manifest version records are bounded summaries (`files: []`, capped history); full per-file indexes live inside the bundle at `.contextsdk/versions/`.
 - Portable bundles must default to user/agent state only.
 - Keep dependency-heavy paths out of the portable bundle by default:
@@ -48,11 +51,15 @@ Do not collapse these layers. The portable context is the cross-provider source 
 
 ## Runtime Behavior
 
+Mount-mode decision (shared by attach/save/detach — session callers pass the actual mounted mode so the layers can never disagree): tree contexts use the unprivileged directory-bundle path whenever the runtime supports it; the loop-ext4 path is only for contexts whose current data is an ext4 image.
+
+Sandbox lifetimes: provider defaults (~5 minutes) kill agent sessions, so adapters default to E2B 30 min, Vercel 45 min, Modal 60 min. E2B and Vercel implement `keepAlive()`, called by the session heartbeat (same cadence as lock renewal) to extend the countdown while a session runs. Remote pack/unpack/mount/save commands get a 15-minute default timeout (`commandTimeoutMs`).
+
 E2B:
 
-- Uses loop-mounted ext4 where supported.
-- Can materialize a tree bundle into an ext4 image for the runtime.
-- For tree contexts, final save stores the filtered encrypted tree bundle. Explicit ext4 contexts may also update `current.img.enc`.
+- Tree contexts (default) use the directory-bundle path — no host ext4 tooling.
+- Explicit ext4 contexts build the image on the host (needs `e2fsprogs`) and loop-mount in the sandbox.
+- Presigned-URL transfers retry with backoff; fresh sandboxes can take >10s before ingress resolves.
 
 Vercel:
 
@@ -60,15 +67,24 @@ Vercel:
 - Defaults to persistent named sandboxes, derived from the context id: `contextsdk-<contextId>`.
 - Keeps `node_modules`, package caches, and build output in Vercel runtime state, not the portable bundle.
 - Records runtime-state metadata in `manifest.json` when available.
+- Headless auth needs the full `token`/`teamId`/`projectId` triple (CLI reads `VERCEL_TOKEN`/`VERCEL_TEAM_ID`/`VERCEL_PROJECT_ID`) or `VERCEL_OIDC_TOKEN`.
+- Stopped persistent sandboxes expire their snapshots (default 14 days); an expired sandbox is recreated empty and only the portable context is restored.
 
 Modal:
 
 - Uses Modal Sandbox with Volume-backed directories.
 - Still exports the encrypted tree bundle so context can move to another provider.
+- No extend-at-runtime API in the JS SDK; size `timeoutMs` to the workload (max 24h). `dispose()` only terminates sandboxes the adapter created.
 
 SSH:
 
-- Treat as an attach-only runtime unless a provisioner is added.
+- Attach-only runtime (no provisioner). Uses the directory-bundle path, wraps remote commands in `bash -lc` (core scripts use `pipefail`, which dash rejects), and passes `BatchMode=yes` + `ConnectTimeout` so it never hangs on prompts.
+
+## Storage and CLI
+
+- CLI storage resolution: explicit S3 (env or config) → `CONTEXTSDK_STORAGE_DIR`/config fs directory → `~/.contextsdk/storage` (local `FsStorage`, content-hash ETags, per-key lock dirs for CAS). The CLI must keep working with zero cloud configuration.
+- `contextsdk run` prints the wrapped command's stdout/stderr and propagates its exit code; `--json` emits the envelope.
+- Host prerequisites: Node >= 20, POSIX (`tar`, `zstd`, `python3`); packages are ESM-only. Windows is unsupported outside WSL.
 
 ## Package Status
 
@@ -80,9 +96,9 @@ Published on npm (install verified on 2026-06-05 via `npm install` in a clean di
 - `@contextsdk/adapter-modal@0.2.0`
 - `@contextsdk/cli@0.2.0`
 
-0.2.0 adds: conditional-write (ETag CAS) lock acquisition and renewal, lock-ownership assertion on save, scrypt parameters recorded in encryption metadata with a stronger default (cost 2^17), symlink/hardlink/special-file validation in bundles, bounded manifest version history, and CLI fixes (dynamic version, exit-code propagation, `files write --stdin`).
+The repository is at `0.3.0` (unreleased). See `CHANGELOG.md` for the full list: generation-keyed save commit protocol with manifest CAS, GCM tag/nonce pinning, e2b SDK v2, sandbox lifetime defaults + keepAlive, E2B transfer retries, runtime-side archive validation with bomb caps, local `FsStorage` default for the CLI, SSH adapter overhaul, adapters declaring core as a peer dependency, and a CLI breaking change (`run` output).
 
-Compatibility note: bundles encrypted by 0.2.0 with the new default scrypt parameters cannot be decrypted by 0.1.0 (it ignores the recorded parameters). 0.2.0 reads 0.1.0 bundles fine.
+Compatibility: 0.3.0 reads contexts written by 0.1.0/0.2.0 (legacy fixed `current.*` keys migrate on next save), and 0.2.0 can read contexts saved by 0.3.0. Bundles encrypted with the 0.2.0+ default scrypt parameters cannot be decrypted by 0.1.0.
 
 ## Commands
 
@@ -112,7 +128,7 @@ npm publish -w @contextsdk/adapter-modal --access public
 npm publish -w @contextsdk/cli --access public
 ```
 
-If npm asks for MFA, do not put tokens or recovery codes in shell command history. Read them through stdin or use a temporary npm token. Remove any token from `~/.npmrc` after publishing.
+If npm asks for MFA, do not put tokens or recovery codes in shell command history. Read them through stdin or use a temporary npm token. Remove any token from `~/.npmrc` after publishing. Update `CHANGELOG.md` (date the release) and the Package Status sections here and in `README.md` after install verification.
 
 ## Documentation Rules
 
@@ -120,6 +136,7 @@ If npm asks for MFA, do not put tokens or recovery codes in shell command histor
 - Keep published package status aligned with install verification and release notes.
 - When changing runtime persistence behavior, update the two-layer state explanation.
 - When changing default persisted roots or exclude patterns, update docs and tests together.
+- When changing storage key layout or the commit protocol, update the Storage layout section in `README.md` and the compatibility notes here.
 
 ## GitHub
 
@@ -135,7 +152,7 @@ Keep GitHub metadata aligned with the project:
 - Homepage: `https://www.npmjs.com/org/contextsdk`
 - Topics should include: `ai-agents`, `sandbox`, `filesystem`, `persistence`, `typescript`, `e2b`, `vercel`, `modal`
 
-For release tags, use semver tags such as `v0.1.0`.
+For release tags, use semver tags such as `v0.2.0`.
 
 ## Implementation Style
 

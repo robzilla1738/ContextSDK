@@ -48,8 +48,11 @@ export async function packContextTree(options: PackContextTreeOptions): Promise<
   await rm(options.archivePath, { force: true });
   const items = await existingArchiveItems(options.root, policy);
   const excludeArgs = policy.exclude.flatMap(pattern => ["--exclude", pattern]);
+  // --no-xattrs (supported by both GNU tar and bsdtar) keeps host-specific extended
+  // attributes out of the bundle: they are not portable across providers and make
+  // macOS bsdtar emit "Could not pack extended attributes" warnings.
   await runPipeline([
-    { command: "tar", args: ["-C", options.root, ...excludeArgs, "-cf", "-", ...items] },
+    { command: "tar", args: ["--no-xattrs", "-C", options.root, ...excludeArgs, "-cf", "-", ...items] },
     { command: "zstd", args: ["-T0", "-q", "-o", options.archivePath] },
   ]);
 }
@@ -66,68 +69,53 @@ export async function unpackContextTree(options: UnpackContextTreeOptions): Prom
   ]);
 }
 
-export async function assertSafeArchive(archivePath: string): Promise<void> {
-  const listing = await runCapture("sh", ["-lc", `zstd -dc ${shellArg(archivePath)} | tar -tf -`]);
-  for (const rawEntry of listing.split("\n")) {
-    const entry = rawEntry.trim();
-    if (!entry) {
-      continue;
-    }
-    const normalized = entry.replace(/^\.\//, "");
-    if (
-      entry.startsWith("/")
-      || normalized === ".."
-      || normalized.startsWith("../")
-      || normalized.includes("/../")
-      || normalized.includes("\0")
-    ) {
-      throw new ContextSDKError(`unsafe archive entry: ${entry}`);
-    }
-  }
-  // `tar -tf` hides entry types and link targets, so a second, verbose pass guards
-  // against symlink/hardlink escapes and special files that the name check cannot see.
-  const verbose = await runCapture("sh", ["-lc", `zstd -dc ${shellArg(archivePath)} | tar -tvf -`]);
-  for (const rawLine of verbose.split("\n")) {
-    const line = rawLine.trim();
-    if (!line) {
-      continue;
-    }
-    const typeChar = line[0];
-    if (typeChar === "b" || typeChar === "c" || typeChar === "p" || typeChar === "s") {
-      throw new ContextSDKError(`unsafe archive entry type '${typeChar}': ${line}`);
-    }
-    if (typeChar === "l") {
-      const marker = line.indexOf(" -> ");
-      if (marker === -1) {
-        throw new ContextSDKError(`unreadable symlink archive entry: ${line}`);
-      }
-      if (line.indexOf(" -> ", marker + 4) !== -1) {
-        // More than one marker means the name or target embeds the separator;
-        // the target cannot be parsed unambiguously, so fail closed.
-        throw new ContextSDKError(`ambiguous symlink archive entry: ${line}`);
-      }
-      assertSafeLinkTarget(line.slice(marker + 4), line);
-    }
-    // Only entries typed 'h' are hardlinks; matching " link to " on other lines
-    // would falsely reject regular files whose names contain that text.
-    if (typeChar === "h") {
-      const hardlinkMarker = line.lastIndexOf(" link to ");
-      if (hardlinkMarker === -1) {
-        throw new ContextSDKError(`unreadable hardlink archive entry: ${line}`);
-      }
-      assertSafeLinkTarget(line.slice(hardlinkMarker + " link to ".length), line);
-    }
-  }
-}
+/** Caps that stop decompression bombs before extraction. Generous for real contexts. */
+export const maxArchiveEntries = 1_000_000;
+export const maxArchiveDecompressedBytes = 64 * 1024 ** 3;
 
-function assertSafeLinkTarget(target: string, line: string): void {
-  const trimmed = target.trim();
-  if (
-    trimmed.startsWith("/")
-    || trimmed.includes("\0")
-    || trimmed.split("/").includes("..")
-  ) {
-    throw new ContextSDKError(`unsafe archive link target: ${line}`);
+/**
+ * Validates a bundle by streaming the decompressed tar listing through python's
+ * tarfile and inspecting each member: traversal, link escapes, special files, and
+ * the entry-count + decompressed-byte caps. Streaming (never buffering the whole
+ * listing) is what makes the caps real — a bomb aborts the scan instead of OOMing
+ * the host first. Mirrors the runtime-side validator in unpackBundleScript exactly.
+ */
+export async function assertSafeArchive(archivePath: string): Promise<void> {
+  await requireTool("python3");
+  const script = [
+    "import subprocess, sys, tarfile",
+    "bundle = sys.argv[1]",
+    `MAX_ENTRIES = ${maxArchiveEntries}`,
+    `MAX_BYTES = ${maxArchiveDecompressedBytes}`,
+    "def unsafe_segments(value):",
+    "    value = value.replace('\\\\', '/')",
+    "    return value.startswith('/') or '\\x00' in value or '..' in value.split('/')",
+    "count = 0",
+    "total = 0",
+    "proc = subprocess.Popen(['zstd', '-dc', bundle], stdout=subprocess.PIPE)",
+    "with tarfile.open(fileobj=proc.stdout, mode='r|') as archive:",
+    "    for m in archive:",
+    "        count += 1",
+    "        if count > MAX_ENTRIES:",
+    "            sys.exit('archive exceeds the %d entry limit' % MAX_ENTRIES)",
+    "        total += m.size",
+    "        if total > MAX_BYTES:",
+    "            sys.exit('archive exceeds the %d byte decompressed limit' % MAX_BYTES)",
+    "        if unsafe_segments(m.name):",
+    "            sys.exit('unsafe archive entry: ' + m.name)",
+    "        if (m.issym() or m.islnk()):",
+    "            if unsafe_segments(m.linkname):",
+    "                sys.exit('unsafe archive link target: %s -> %s' % (m.name, m.linkname))",
+    "        elif not (m.isfile() or m.isdir()):",
+    "            sys.exit('unsupported archive entry type: ' + m.name)",
+    "while proc.stdout.read(1024 * 1024):",
+    "    pass",
+    "if proc.wait() != 0:",
+    "    sys.exit('zstd decompression failed')",
+  ].join("\n");
+  const result = await runProcess("python3", ["-c", script, archivePath]);
+  if (result.exitCode !== 0) {
+    throw new ContextSDKError(`unsafe or unreadable archive: ${(result.stderr || result.stdout).trim()}`);
   }
 }
 
@@ -169,7 +157,12 @@ async function existingArchiveItems(root: string, policy: ContextPersistencePoli
       continue;
     }
   }
-  return items.length ? items : ["."];
+  if (items.length === 0) {
+    // Falling back to "." would silently pack the entire root, including runtime
+    // caches the persistence policy exists to exclude.
+    throw new ContextSDKError(`no managed context entries found under ${root}; refusing to pack the whole directory`);
+  }
+  return items;
 }
 
 function shouldPersistPath(path: string, policy: ContextPersistencePolicy): boolean {
@@ -214,14 +207,6 @@ async function requireTool(name: string): Promise<void> {
   if (result.exitCode !== 0) {
     throw new ContextSDKError(`missing required local tool: ${name}`);
   }
-}
-
-async function runCapture(command: string, args: string[]): Promise<string> {
-  const result = await runProcess(command, args);
-  if (result.exitCode !== 0) {
-    throw new ContextSDKError(`${command} failed with exit code ${result.exitCode}\n${result.stdout}\n${result.stderr}`.trim());
-  }
-  return result.stdout;
 }
 
 function runPipeline(stages: Array<{ command: string; args: string[] }>): Promise<void> {

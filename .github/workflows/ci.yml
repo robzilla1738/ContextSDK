@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22, 24]
+    name: Node ${{ matrix.node }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install tools used by bundle tests
+        run: sudo apt-get update && sudo apt-get install -y zstd e2fsprogs
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck and build
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: CLI smoke
+        env:
+          CONTEXTSDK_PASSPHRASE: ci-smoke-passphrase
+          CONTEXTSDK_STORAGE_DIR: /tmp/contextsdk-ci-store
+        run: |
+          node packages/cli/dist/cli.js doctor
+          node packages/cli/dist/cli.js run --help
+          node packages/cli/dist/cli.js probe --help
+          node packages/cli/dist/cli.js init ci-smoke
+          node packages/cli/dist/cli.js status ci-smoke
+          node packages/cli/dist/cli.js verify ci-smoke
+
+      - name: Pack dry-run
+        run: |
+          npm pack --dry-run -w @contextsdk/core
+          npm pack --dry-run -w @contextsdk/adapter-e2b
+          npm pack --dry-run -w @contextsdk/adapter-vercel
+          npm pack --dry-run -w @contextsdk/adapter-modal
+          npm pack --dry-run -w @contextsdk/cli
+
+      - name: Whitespace check
+        run: git diff --check

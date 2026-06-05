@@ -17,6 +17,10 @@ export function ensureDirectoryBundleToolsScript(): string {
     "  if command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y zstd; elif command -v dnf >/dev/null 2>&1; then dnf install -y zstd; else echo \"missing zstd\" >&2; exit 31; fi",
     "fi",
     "command -v zstd >/dev/null 2>&1 || { echo \"missing zstd\" >&2; exit 31; }",
+    "if ! command -v python3 >/dev/null 2>&1; then",
+    "  if command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y python3; elif command -v dnf >/dev/null 2>&1; then dnf install -y python3; else echo \"missing python3\" >&2; exit 32; fi",
+    "fi",
+    "command -v python3 >/dev/null 2>&1 || { echo \"missing python3\" >&2; exit 32; }",
   ].join("\n");
 }
 
@@ -30,7 +34,9 @@ export function mountScript(imagePath: string, mountPath: string): string {
     // Release the loop device if anything after losetup fails; cleared on success.
     "trap 'losetup -d \"$loopdev\" 2>/dev/null || true' EXIT",
     "mount -t ext4 \"$loopdev\" \"$mountpoint\"",
-    "for root in workspace memory artifacts logs cache config; do mkdir -p \"$mountpoint/$root\"; if [ -L \"/$root\" ] || [ ! -e \"/$root\" ]; then ln -sfn \"$mountpoint/$root\" \"/$root\"; fi; done",
+    // The /workspace-style root symlinks are convenience sugar; a read-only or
+    // pre-populated / must not fail the attach. The canonical path is $mountpoint.
+    "for root in workspace memory artifacts logs cache config; do mkdir -p \"$mountpoint/$root\"; if [ -L \"/$root\" ] || [ ! -e \"/$root\" ]; then ln -sfn \"$mountpoint/$root\" \"/$root\" 2>/dev/null || true; fi; done",
     "findmnt --target \"$mountpoint\"",
     "trap - EXIT",
     "printf 'CONTEXTSDK_MOUNT_JSON=%s\\n' \"{\\\"loopDevice\\\":\\\"$loopdev\\\",\\\"mountPath\\\":\\\"$mountpoint\\\",\\\"remoteImagePath\\\":\\\"$image\\\"}\"",
@@ -62,10 +68,58 @@ export function unpackBundleScript(bundlePath: string, mountPath: string, policy
     "    elif path.is_dir():",
     "        shutil.rmtree(path)",
     "PY",
-    "zstd -dc \"$bundle\" | tar -C \"$mountpoint\" -xf -",
+    // Stream-extract with per-member validation: the archive-safety invariant must hold
+    // on the runtime too, where extraction runs as root. python decompresses through a
+    // zstd subprocess so a decompression bomb never lands on disk: caps abort mid-stream.
+    "CONTEXTSDK_MOUNT=\"$mountpoint\" python3 - \"$bundle\" <<'PY'",
+    "import os, subprocess, sys, tarfile",
+    "mount = os.environ['CONTEXTSDK_MOUNT']",
+    "mount_real = os.path.realpath(mount)",
+    "bundle = sys.argv[1]",
+    "MAX_ENTRIES = 1000000",
+    "MAX_BYTES = 64 * 1024**3",
+    "def unsafe_segments(value):",
+    "    value = value.replace('\\\\', '/')",
+    "    return value.startswith('/') or '\\x00' in value or '..' in value.split('/')",
+    "def escapes_mount(name):",
+    "    # Catches extraction THROUGH a symlink created earlier in the archive,",
+    "    # which name checks alone cannot see (and python < 3.12 has no 'data' filter).",
+    "    parent = os.path.realpath(os.path.join(mount_real, os.path.dirname(name)))",
+    "    return parent != mount_real and not parent.startswith(mount_real + os.sep)",
+    "count = 0",
+    "total = 0",
+    "proc = subprocess.Popen(['zstd', '-dc', bundle], stdout=subprocess.PIPE)",
+    "with tarfile.open(fileobj=proc.stdout, mode='r|') as archive:",
+    "    for member in archive:",
+    "        count += 1",
+    "        if count > MAX_ENTRIES:",
+    "            sys.exit('archive exceeds the %d entry limit' % MAX_ENTRIES)",
+    "        total += member.size",
+    "        if total > MAX_BYTES:",
+    "            sys.exit('archive exceeds the %d byte decompressed limit' % MAX_BYTES)",
+    "        if unsafe_segments(member.name):",
+    "            sys.exit('unsafe archive entry: ' + member.name)",
+    "        if (member.issym() or member.islnk()) and unsafe_segments(member.linkname):",
+    "            sys.exit('unsafe archive link target: %s -> %s' % (member.name, member.linkname))",
+    "        if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):",
+    "            sys.exit('unsupported archive entry type: ' + member.name)",
+    "        if escapes_mount(member.name):",
+    "            sys.exit('archive entry resolves outside the mount: ' + member.name)",
+    "        try:",
+    "            archive.extract(member, path=mount, filter='data')",
+    "        except TypeError:",
+    "            archive.extract(member, path=mount)",
+    "# Streaming tarfile stops at the tar EOF marker; drain any trailing bytes in the",
+    "# zstd frame or zstd blocks on a full pipe and proc.wait() never returns.",
+    "while proc.stdout.read(1024 * 1024):",
+    "    pass",
+    "if proc.wait() != 0:",
+    "    sys.exit('zstd decompression failed')",
+    "PY",
     // The bundle on the runtime is decrypted context data; remove it once extracted.
     "rm -f \"$bundle\"",
-    "for root in workspace memory artifacts logs cache config; do mkdir -p \"$mountpoint/$root\"; if [ -L \"/$root\" ] || [ ! -e \"/$root\" ]; then ln -sfn \"$mountpoint/$root\" \"/$root\"; fi; done",
+    // Convenience symlinks only; never fail the attach over a read-only /.
+    "for root in workspace memory artifacts logs cache config; do mkdir -p \"$mountpoint/$root\"; if [ -L \"/$root\" ] || [ ! -e \"/$root\" ]; then ln -sfn \"$mountpoint/$root\" \"/$root\" 2>/dev/null || true; fi; done",
     "printf 'CONTEXTSDK_MOUNT_JSON=%s\\n' \"{\\\"mountPath\\\":\\\"$mountpoint\\\",\\\"remoteBundlePath\\\":\\\"$bundle\\\",\\\"mode\\\":\\\"directoryBundle\\\"}\"",
   ].join("\n");
 }

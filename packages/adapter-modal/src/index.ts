@@ -4,6 +4,13 @@ import { ModalClient, type ModalClientParams, type Sandbox, type SandboxCreatePa
 import { sanitizeId } from "@contextsdk/core";
 import type { RuntimeAdapter, RuntimeCommandResult, RuntimeProvisionOptions, RuntimeRunOptions } from "@contextsdk/core";
 
+/**
+ * Modal terminates sandboxes 5 minutes after creation by default — far too short for
+ * agent sessions. Modal has no extend-at-runtime API in its JS SDK, so the lifetime
+ * must be sized to the workload up front (capped by Modal at 24 hours).
+ */
+export const defaultSandboxTimeoutMs = 60 * 60_000;
+
 export interface ModalAdapterOptions {
   sandbox?: Sandbox;
   sandboxId?: string;
@@ -15,6 +22,8 @@ export interface ModalAdapterOptions {
   volumeMountPath?: string;
   volumeSubPath?: string;
   timeoutMs?: number;
+  /** Terminate the sandbox after this much exec inactivity, independent of timeoutMs. */
+  idleTimeoutMs?: number;
   cpu?: number;
   memoryMiB?: number;
   env?: Record<string, string>;
@@ -29,24 +38,30 @@ export class ModalSandboxAdapter implements RuntimeAdapter {
     providerSnapshot: false,
   };
   readonly id: string;
+  readonly sandboxTimeoutMs: number;
   private readonly volumeMountPath: string;
+  private readonly ownsSandbox: boolean;
 
   private constructor(
     private readonly sandbox: Sandbox,
-    options: { volumeMountPath: string },
+    options: { volumeMountPath: string; ownsSandbox: boolean; timeoutMs: number },
   ) {
     this.id = `modal:${sandbox.sandboxId}`;
     this.volumeMountPath = options.volumeMountPath;
+    this.ownsSandbox = options.ownsSandbox;
+    this.sandboxTimeoutMs = options.timeoutMs;
   }
 
   static async create(options: ModalAdapterOptions = {}): Promise<ModalSandboxAdapter> {
     const client = options.client ?? new ModalClient(options.clientOptions);
     const volumeMountPath = options.volumeMountPath ?? "/contextsdk";
+    const ownsSandbox = !options.sandbox && !options.sandboxId;
+    const timeoutMs = options.timeoutMs ?? defaultSandboxTimeoutMs;
     const sandbox = options.sandbox
       ?? (options.sandboxId
         ? await client.sandboxes.fromId(options.sandboxId)
         : await createSandbox(client, volumeMountPath, options));
-    return new ModalSandboxAdapter(sandbox, { volumeMountPath });
+    return new ModalSandboxAdapter(sandbox, { volumeMountPath, ownsSandbox, timeoutMs });
   }
 
   defaultMountPath(contextId: string): string {
@@ -80,7 +95,11 @@ export class ModalSandboxAdapter implements RuntimeAdapter {
   }
 
   async dispose(): Promise<void> {
-    await this.sandbox.terminate();
+    // A sandbox the caller supplied (or reattached to by id) belongs to the
+    // caller's lifecycle; terminating it here would kill their session.
+    if (this.ownsSandbox) {
+      await this.sandbox.terminate();
+    }
   }
 }
 
@@ -104,7 +123,8 @@ async function createSandbox(client: ModalClient, volumeMountPath: string, optio
   const params: SandboxCreateParams = {
     volumes: { [volumeMountPath]: mountedVolume },
     workdir: volumeMountPath,
-    timeoutMs: options.timeoutMs,
+    timeoutMs: options.timeoutMs ?? defaultSandboxTimeoutMs,
+    idleTimeoutMs: options.idleTimeoutMs,
     cpu: options.cpu,
     memoryMiB: options.memoryMiB,
     env: options.env,

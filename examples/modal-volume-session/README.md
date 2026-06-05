@@ -1,6 +1,6 @@
 # Modal Volume Session
 
-Goal: use a Modal Volume-backed context directory while still exporting the encrypted portable bundle to S3-compatible storage.
+Goal: use a Modal Volume-backed context directory while still exporting the encrypted portable bundle to storage. With no S3 bucket configured the bundle lands in the local store (`~/.contextsdk/storage`); set `CONTEXTSDK_S3_*` for shared S3-compatible storage.
 
 ```bash
 node packages/cli/dist/cli.js run modal-demo \

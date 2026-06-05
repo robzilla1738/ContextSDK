@@ -92,6 +92,8 @@ export interface AttachContextOptions {
   owner?: string;
   lockTtlMs?: number;
   forceUnlock?: boolean;
+  /** Timeout for remote pack/unpack/mount commands. Defaults to 15 minutes. */
+  commandTimeoutMs?: number;
 }
 
 export interface SaveContextOptions {
@@ -106,6 +108,10 @@ export interface SaveContextOptions {
   message?: string;
   persistencePolicy?: Partial<ContextPersistencePolicy>;
   runtimeState?: "auto" | "disabled";
+  /** The mode attach mounted with. Session callers pass it so save never re-derives a different one. */
+  mode?: MountedContext["mode"];
+  /** Timeout for remote pack/save commands. Defaults to 15 minutes. */
+  commandTimeoutMs?: number;
 }
 
 export interface DetachContextOptions {
@@ -116,6 +122,10 @@ export interface DetachContextOptions {
   owner?: string;
   cleanupRemote?: boolean;
   forceUnlock?: boolean;
+  /** The mode attach mounted with. Session callers pass it so detach never re-derives a different one. */
+  mode?: MountedContext["mode"];
+  /** Timeout for remote detach commands. Defaults to 15 minutes. */
+  commandTimeoutMs?: number;
 }
 
 export interface MountedContext {
@@ -256,4 +266,6 @@ export interface RunWithContextOptions extends Omit<StartContextSessionOptions, 
 export interface CheckpointContextOptions {
   reason?: string;
   persistencePolicy?: Partial<ContextPersistencePolicy>;
+  /** Timeout for the remote pack command. Defaults to 15 minutes. */
+  commandTimeoutMs?: number;
 }

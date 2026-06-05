@@ -2,12 +2,15 @@ import type { ContextFormat, ContextPersistencePolicy, RuntimeProvider } from ".
 
 export interface ContextSDKConfig {
   storage?: {
-    type?: "s3";
+    /** "s3" for S3-compatible object storage; "fs" for a local directory store. */
+    type?: "s3" | "fs";
     bucket?: string;
     prefix?: string;
     region?: string;
     endpoint?: string;
     forcePathStyle?: boolean;
+    /** Object directory for type "fs". Defaults to ~/.contextsdk/storage. */
+    directory?: string;
   };
   encryption?: {
     passphraseEnv?: string;

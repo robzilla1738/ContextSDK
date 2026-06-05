@@ -1,6 +1,6 @@
 {
   "name": "@contextsdk/core",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Portable encrypted context state for AI sandboxes and VMs",
   "license": "MIT",
   "type": "module",
@@ -43,5 +43,6 @@
   },
   "engines": {
     "node": ">=20.0.0"
-  }
+  },
+  "sideEffects": false
 }

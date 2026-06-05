@@ -121,4 +121,41 @@ describe("encryption", () => {
     await expect(encryptFile(input, join(dir, "enc"), { passphrase: "test", scrypt: { cost: 1000 } }))
       .rejects.toThrow(/power of two/);
   });
+
+  it("rejects a truncated auth tag instead of authenticating against it", async () => {
+    const input = join(dir, "input");
+    const encrypted = join(dir, "encrypted");
+    const output = join(dir, "output");
+    await writeFile(input, "tag length matters\n");
+    const metadata = await encryptFile(input, encrypted, { passphrase: "test", scrypt: fastScrypt });
+    // GCM verifies against whatever tag length setAuthTag receives; a manifest
+    // rewrite must not be able to downgrade the effective tag strength.
+    const truncated: EncryptionMetadata = {
+      ...metadata,
+      authTag: Buffer.from(metadata.authTag, "base64").subarray(0, 8).toString("base64"),
+    };
+    await expect(decryptFile(encrypted, output, truncated, { passphrase: "test" })).rejects.toThrow(/authTag must be 16 bytes/);
+  });
+
+  it("rejects a nonce of unexpected length", async () => {
+    const input = join(dir, "input");
+    const encrypted = join(dir, "encrypted");
+    await writeFile(input, "nonce length matters\n");
+    const metadata = await encryptFile(input, encrypted, { passphrase: "test", scrypt: fastScrypt });
+    const oversized: EncryptionMetadata = { ...metadata, nonce: Buffer.alloc(16, 1).toString("base64") };
+    await expect(decryptFile(encrypted, join(dir, "out"), oversized, { passphrase: "test" })).rejects.toThrow(/nonce must be 12 bytes/);
+  });
+
+  it("removes the partially written plaintext when authentication fails", async () => {
+    const input = join(dir, "input");
+    const encrypted = join(dir, "encrypted");
+    const output = join(dir, "output");
+    await writeFile(input, "do not leave unverified plaintext behind\n");
+    const metadata = await encryptFile(input, encrypted, { passphrase: "test", scrypt: fastScrypt });
+    const ciphertext = await readFile(encrypted);
+    ciphertext[ciphertext.length - 1] ^= 0xff;
+    await writeFile(encrypted, ciphertext);
+    await expect(decryptFile(encrypted, output, metadata, { passphrase: "test" })).rejects.toThrow();
+    await expect(readFile(output)).rejects.toThrow(/ENOENT/);
+  });
 });

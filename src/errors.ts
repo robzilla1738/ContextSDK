@@ -32,3 +32,19 @@ export class StorageConditionError extends ContextSDKError {
     this.name = "StorageConditionError";
   }
 }
+
+export class RuntimeCommandError extends ContextSDKError {
+  readonly label: string;
+  readonly exitCode: number;
+  readonly stdout: string;
+  readonly stderr: string;
+
+  constructor(label: string, result: { exitCode: number; stdout: string; stderr: string }) {
+    super(`${label} failed with exit code ${result.exitCode}\n${result.stdout}\n${result.stderr}`.trim());
+    this.name = "RuntimeCommandError";
+    this.label = label;
+    this.exitCode = result.exitCode;
+    this.stdout = result.stdout;
+    this.stderr = result.stderr;
+  }
+}

@@ -13,6 +13,13 @@ import type {
 const DEFAULT_SNAPSHOT_EXPIRATION_MS = 14 * 24 * 60 * 60 * 1000;
 const DEFAULT_KEEP_LAST_SNAPSHOTS = 3;
 
+/**
+ * Vercel stops sandboxes 5 minutes after creation unless a timeout is set — far too
+ * short for agent sessions. 45 minutes stays within every plan's limit, and the
+ * keepAlive heartbeat extends it while a session is actively running.
+ */
+export const defaultSandboxTimeoutMs = 45 * 60_000;
+
 export interface VercelAdapterOptions {
   sandbox?: Sandbox;
   sandboxName?: string;
@@ -24,6 +31,14 @@ export interface VercelAdapterOptions {
   persistent?: boolean;
   snapshotExpirationMs?: number;
   keepLastSnapshots?: number;
+  /**
+   * Vercel API token, with teamId and projectId, for headless use. Without these the
+   * SDK falls back to the VERCEL_OIDC_TOKEN environment variable (`vercel link` +
+   * `vercel env pull`) or an interactive login prompt.
+   */
+  token?: string;
+  teamId?: string;
+  projectId?: string;
 }
 
 export class VercelSandboxAdapter implements RuntimeAdapter {
@@ -35,18 +50,26 @@ export class VercelSandboxAdapter implements RuntimeAdapter {
     providerSnapshot: true,
   };
   readonly id: string;
+  readonly sandboxTimeoutMs: number;
   private stopped = false;
   private lastRuntimeState?: RuntimeStateMetadata;
+  // Tracks the deadline we have driven the sandbox toward. extendTimeout adds to
+  // the current deadline, so keepAlive extends by only the delta back to
+  // now+timeoutMs each beat instead of pushing the deadline toward the plan cap.
+  private intendedDeadline: number;
 
   private constructor(
     private readonly sandbox: Sandbox,
-    private readonly options: { persistent: boolean },
+    private readonly options: { persistent: boolean; timeoutMs: number; now: number },
   ) {
     this.id = `vercel:${sandbox.name}`;
+    this.sandboxTimeoutMs = options.timeoutMs;
+    this.intendedDeadline = options.now + options.timeoutMs;
   }
 
   static async create(options: VercelAdapterOptions = {}): Promise<VercelSandboxAdapter> {
     const persistent = options.persistent ?? true;
+    const timeoutMs = options.timeoutMs ?? defaultSandboxTimeoutMs;
     const sandboxName = options.sandboxName ?? (options.contextId ? defaultVercelSandboxName(options.contextId) : undefined);
     const sandbox = options.sandbox
       ?? await createVercelSandbox({
@@ -54,7 +77,7 @@ export class VercelSandboxAdapter implements RuntimeAdapter {
         sandboxName,
         persistent,
       });
-    return new VercelSandboxAdapter(sandbox, { persistent });
+    return new VercelSandboxAdapter(sandbox, { persistent, timeoutMs, now: Date.now() });
   }
 
   defaultMountPath(contextId: string): string {
@@ -62,6 +85,12 @@ export class VercelSandboxAdapter implements RuntimeAdapter {
   }
 
   async run(command: string, options: RuntimeRunOptions = {}): Promise<RuntimeCommandResult> {
+    // Vercel sandboxes expose exactly two identities: the default vercel-sandbox
+    // user and root via sudo. Anything else must fail loudly, not run as the
+    // wrong user.
+    if (options.user !== undefined && options.user !== "root" && options.user !== "vercel-sandbox") {
+      throw new Error(`Vercel runtime only supports user "root" or "vercel-sandbox", got: ${options.user}`);
+    }
     const result = await this.sandbox.runCommand({
       cmd: "bash",
       args: ["-lc", command],
@@ -73,6 +102,21 @@ export class VercelSandboxAdapter implements RuntimeAdapter {
       stdout: await result.stdout(),
       stderr: await result.stderr(),
     };
+  }
+
+  async keepAlive(): Promise<void> {
+    if (this.stopped) {
+      return;
+    }
+    // extendTimeout adds to the current deadline. Extend by only the time elapsed
+    // since the last beat so the deadline tracks now+timeoutMs, never racing the
+    // plan's maximum execution timeout.
+    const target = Date.now() + this.options.timeoutMs;
+    const delta = target - this.intendedDeadline;
+    if (delta > 0) {
+      await this.sandbox.extendTimeout(delta);
+      this.intendedDeadline = target;
+    }
   }
 
   async uploadFile(localPath: string, remotePath: string): Promise<void> {
@@ -151,14 +195,24 @@ export function buildVercelCreateOptionsForTest(options: VercelAdapterOptions = 
   return {
     name: options.sandboxName ?? (options.contextId ? defaultVercelSandboxName(options.contextId) : undefined),
     runtime: options.runtime ?? "python3.13",
-    timeout: options.timeoutMs,
+    timeout: options.timeoutMs ?? defaultSandboxTimeoutMs,
     resources: options.vcpus ? { vcpus: options.vcpus } : undefined,
     env: options.env,
     persistent,
     snapshotExpiration: persistent ? snapshotExpiration : undefined,
     keepLastSnapshots: persistent ? { count: keepLastSnapshots, expiration: snapshotExpiration } : undefined,
     tags: { contextsdk: "true" },
+    ...credentialsFrom(options),
   };
+}
+
+function credentialsFrom(options: VercelAdapterOptions): { token: string; teamId: string; projectId: string } | Record<string, never> {
+  // The SDK requires all three together; partial credentials would make it throw
+  // before falling back to OIDC, so only forward a complete set.
+  if (options.token && options.teamId && options.projectId) {
+    return { token: options.token, teamId: options.teamId, projectId: options.projectId };
+  }
+  return {};
 }
 
 async function createVercelSandbox(options: VercelAdapterOptions & { persistent: boolean }): Promise<Sandbox> {
@@ -168,7 +222,7 @@ async function createVercelSandbox(options: VercelAdapterOptions & { persistent:
   }
   if (options.persistent && options.sandboxName) {
     try {
-      return await Sandbox.get({ name: options.sandboxName });
+      return await Sandbox.get({ name: options.sandboxName, ...credentialsFrom(options) } as never);
     } catch {
       return Sandbox.create(createOptions as never);
     }

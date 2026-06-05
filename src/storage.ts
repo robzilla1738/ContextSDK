@@ -1,3 +1,4 @@
+import { constants as bufferConstants } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
 import { ContextSDKError, ObjectNotFoundError, StorageConditionError } from "./errors.js";
@@ -25,6 +26,11 @@ export interface StorageAdapter {
   putObject(key: string, body: Buffer | Uint8Array | string, options?: PutObjectOptions): Promise<void>;
   deleteObject(key: string): Promise<void>;
   headObject(key: string): Promise<ObjectMetadata | null>;
+  /**
+   * Lists keys under a prefix. Optional: adapters that cannot enumerate (or choose
+   * not to) may omit it, in which case prefix-wide cleanup degrades to best-effort.
+   */
+  listObjects?(prefix: string): Promise<string[]>;
 }
 
 export class MemoryStorage implements StorageAdapter {
@@ -75,6 +81,10 @@ export class MemoryStorage implements StorageAdapter {
     }
     return { size: object.body.byteLength, updatedAt: object.updatedAt, etag: object.etag };
   }
+
+  async listObjects(prefix: string): Promise<string[]> {
+    return [...this.objects.keys()].filter(key => key.startsWith(prefix));
+  }
 }
 
 export async function readableToBuffer(input: unknown): Promise<Buffer> {
@@ -89,8 +99,19 @@ export async function readableToBuffer(input: unknown): Promise<Buffer> {
   }
   if (input instanceof Readable || (input && typeof (input as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator] === "function")) {
     const chunks: Buffer[] = [];
+    let total = 0;
     for await (const chunk of input as AsyncIterable<Buffer | Uint8Array | string>) {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      total += buffer.byteLength;
+      // Storage bodies are materialized as a single Buffer; past the platform limit V8
+      // throws an opaque RangeError. Fail with an actionable message instead.
+      if (total > bufferConstants.MAX_LENGTH) {
+        throw new ContextSDKError(
+          `object exceeds the maximum supported in-memory size of ${bufferConstants.MAX_LENGTH} bytes; `
+          + "split the context or exclude large runtime artifacts from the portable bundle",
+        );
+      }
+      chunks.push(buffer);
     }
     return Buffer.concat(chunks);
   }

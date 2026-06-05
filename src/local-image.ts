@@ -31,6 +31,21 @@ export async function validateExt4Image(imagePath: string): Promise<void> {
   await runLocal(e2fsck, ["-fn", imagePath]);
 }
 
+/** Sum of regular-file sizes under root. Used to size ext4 images from decompressed trees. */
+export async function directorySizeBytes(root: string): Promise<number> {
+  let total = 0;
+  const entries = await readdir(root, { withFileTypes: true });
+  for (const entry of entries) {
+    const path = join(root, entry.name);
+    if (entry.isDirectory()) {
+      total += await directorySizeBytes(path);
+    } else if (entry.isFile()) {
+      total += (await stat(path)).size;
+    }
+  }
+  return total;
+}
+
 export async function parseSize(size: string | number): Promise<number> {
   if (typeof size === "number") {
     return size;

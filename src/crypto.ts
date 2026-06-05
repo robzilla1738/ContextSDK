@@ -1,11 +1,14 @@
 import { createCipheriv, createDecipheriv, randomBytes, scrypt } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
+import { rm } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 import type { EncryptionConfig, EncryptionMetadata, ScryptParams } from "./types.js";
 import { ContextSDKError } from "./errors.js";
 
 const keyLength = 32;
+const nonceLength = 12;
+const authTagLength = 16;
 const scryptAsync = promisify(scrypt) as (
   password: string,
   salt: Buffer,
@@ -22,10 +25,12 @@ export const legacyScryptParams: ScryptParams = { cost: 16384, blockSize: 8, par
 export async function encryptFile(inputPath: string, outputPath: string, config: EncryptionConfig): Promise<EncryptionMetadata> {
   const useRawKey = Boolean(config.rawKeyHex);
   const salt = useRawKey ? undefined : randomBytes(16);
-  const nonce = randomBytes(12);
+  const nonce = randomBytes(nonceLength);
   const scryptParams = useRawKey ? undefined : resolveScryptParams(config.scrypt);
   const key = await deriveKey(config, useRawKey ? "raw" : "scrypt", salt, scryptParams);
-  const cipher = createCipheriv("aes-256-gcm", key, nonce);
+  const cipher = createCipheriv("aes-256-gcm", key, nonce, { authTagLength });
+  // createCipheriv copies the key into the native handle; scrub the JS copy immediately.
+  key.fill(0);
   await pipeline(createReadStream(inputPath), cipher, createWriteStream(outputPath, { mode: 0o600 }));
   return {
     version: 1,
@@ -46,11 +51,30 @@ export async function decryptFile(inputPath: string, outputPath: string, metadat
     throw new ContextSDKError(`unsupported encryption algorithm: ${metadata.algorithm}`);
   }
   const salt = metadata.salt ? Buffer.from(metadata.salt, "base64") : undefined;
+  const nonce = Buffer.from(metadata.nonce, "base64");
+  const authTag = Buffer.from(metadata.authTag, "base64");
+  // Metadata travels outside the ciphertext, so its fields are attacker-influenceable.
+  // GCM happily verifies against a truncated tag or an unusual nonce length, which would
+  // weaken integrity; pin both to the exact values the encrypt side produces.
+  if (nonce.byteLength !== nonceLength) {
+    throw new ContextSDKError(`encryption metadata nonce must be ${nonceLength} bytes, got ${nonce.byteLength}`);
+  }
+  if (authTag.byteLength !== authTagLength) {
+    throw new ContextSDKError(`encryption metadata authTag must be ${authTagLength} bytes, got ${authTag.byteLength}`);
+  }
   const scryptParams = metadata.keyDerivation === "scrypt" ? metadata.scrypt ?? legacyScryptParams : undefined;
   const key = await deriveKey(config, metadata.keyDerivation, salt, scryptParams);
-  const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(metadata.nonce, "base64"));
-  decipher.setAuthTag(Buffer.from(metadata.authTag, "base64"));
-  await pipeline(createReadStream(inputPath), decipher, createWriteStream(outputPath, { mode: 0o600 }));
+  const decipher = createDecipheriv("aes-256-gcm", key, nonce, { authTagLength });
+  key.fill(0);
+  decipher.setAuthTag(authTag);
+  try {
+    await pipeline(createReadStream(inputPath), decipher, createWriteStream(outputPath, { mode: 0o600 }));
+  } catch (error) {
+    // GCM only verifies the tag at the end of the stream, so a tampered bundle has already
+    // streamed unauthenticated plaintext into outputPath. Never leave that behind.
+    await rm(outputPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
 }
 
 export function resolveScryptParams(overrides?: Partial<ScryptParams>): ScryptParams {

@@ -1,6 +1,7 @@
 import type { ContextSDKConfig } from "@contextsdk/core";
 
 export default {
+  // S3-compatible object storage for shared, multi-machine use.
   storage: {
     type: "s3",
     bucket: "agent-contexts",
@@ -8,6 +9,13 @@ export default {
     endpoint: "https://<account>.r2.cloudflarestorage.com",
     forcePathStyle: true,
   },
+  // Local directory store — no cloud bucket required. Omitting `directory`
+  // uses ~/.contextsdk/storage; CONTEXTSDK_STORAGE_DIR also relocates it.
+  // Note: paths are used verbatim (no "~" expansion).
+  // storage: {
+  //   type: "fs",
+  //   directory: "/srv/agent-contexts",
+  // },
   encryption: {
     passphraseEnv: "CONTEXTSDK_PASSPHRASE",
   },
@@ -50,6 +58,7 @@ export default {
       volumeName: "contextsdk-contexts",
       volumeSubPath: "tenant-a",
       timeoutMs: 600000,
+      idleTimeoutMs: 60000,
     },
   },
 } satisfies ContextSDKConfig;

@@ -1,17 +1,18 @@
+import { randomBytes } from "node:crypto";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { encryptFile, decryptFile } from "./crypto.js";
-import { ContextSDKError } from "./errors.js";
+import { ContextLockError, ContextSDKError, StorageConditionError } from "./errors.js";
 import { createArtifactsApi, createLogsApi, createMemoryApi, MountedContextFileManager } from "./file-manager.js";
-import { createExt4Image, parseSize, validateExt4Image } from "./local-image.js";
+import { createExt4Image, directorySizeBytes, parseSize, validateExt4Image } from "./local-image.js";
 import { acquireLock, assertLockOwnership, defaultLockTtlMs, makeOwner, readLock, releaseLock, renewLock } from "./lock.js";
-import { contextKeys, defaultLayout, defaultMountPath, remoteBundlePath, remoteImagePath } from "./paths.js";
+import { contextKeys, defaultLayout, defaultMountPath, generationDataKeys, isReplaceableDataKey, remoteBundlePath, remoteImagePath } from "./paths.js";
 import { resolvePersistencePolicy } from "./persistence-policy.js";
 import { assertSuccess } from "./runtime.js";
 import { detachDirectoryScript, detachScript, ensureRuntimeToolsScript, mountScript, packBundleScript, saveScript, unpackBundleScript } from "./scripts.js";
 import { shellQuote } from "./shell.js";
-import { packContextTree, prepareContextTree, unpackContextTree } from "./tree-bundle.js";
+import { assertSafeArchive, packContextTree, prepareContextTree, unpackContextTree } from "./tree-bundle.js";
 import { snapshotScript } from "./versioning.js";
 import type { RuntimeAdapter } from "./runtime.js";
 import type { StorageAdapter } from "./storage.js";
@@ -38,6 +39,13 @@ import type {
  */
 const maxManifestVersions = 50;
 
+/**
+ * Remote pack/unpack/mount/save commands operate on whole context trees and can far
+ * outlive provider SDK command-timeout defaults (e2b: 60 seconds). Fifteen minutes is
+ * generous for multi-gigabyte bundles without letting a hung sandbox stall forever.
+ */
+const defaultCommandTimeoutMs = 15 * 60_000;
+
 const sessionWriteQueues = new WeakMap<object, Promise<unknown>>();
 
 /**
@@ -62,6 +70,8 @@ export async function createContext(options: CreateContextOptions): Promise<Cont
   if (!options.force && alreadyExisted) {
     throw new ContextSDKError(`context already exists: ${options.id}`);
   }
+  const previousManifest = alreadyExisted ? await readManifest(options.storage, options.id).catch(() => null) : null;
+  const dataKeys = generationDataKeys(options.id, 1, randomBytes(4).toString("hex"));
   const tempDir = await mkdtemp(join(tmpdir(), "contextsdk-create-"));
   try {
     const format = options.format ?? "tree";
@@ -87,8 +97,8 @@ export async function createContext(options: CreateContextOptions): Promise<Cont
       sizeBytes: format === "ext4" ? sizeBytes || 256 * 1024 * 1024 : (await stat(treePath)).size,
       generation: 1,
       checkpointGeneration: 0,
-      imageKey: keys.image,
-      treeKey: keys.tree,
+      imageKey: dataKeys.image,
+      treeKey: dataKeys.tree,
       encryption: format === "ext4" ? imageEncryption : treeEncryption,
       treeEncryption,
       imageEncryption: format === "ext4" ? imageEncryption : undefined,
@@ -100,20 +110,34 @@ export async function createContext(options: CreateContextOptions): Promise<Cont
     };
     const writtenKeys: string[] = [];
     try {
-      await options.storage.putObject(keys.tree, await readFile(encryptedTreePath));
-      writtenKeys.push(keys.tree);
+      await options.storage.putObject(dataKeys.tree, await readFile(encryptedTreePath));
+      writtenKeys.push(dataKeys.tree);
       if (format === "ext4") {
-        await options.storage.putObject(keys.image, await readFile(encryptedPath));
-        writtenKeys.push(keys.image);
+        await options.storage.putObject(dataKeys.image, await readFile(encryptedPath));
+        writtenKeys.push(dataKeys.image);
       }
-      await options.storage.putObject(keys.manifest, JSON.stringify(manifest, null, 2));
+      // ifNoneMatch closes the race between the head check above and this write:
+      // when two creators race, exactly one manifest wins and the loser rolls back.
+      await options.storage.putObject(
+        keys.manifest,
+        JSON.stringify(manifest, null, 2),
+        options.force ? {} : { ifNoneMatch: "*" },
+      );
     } catch (error) {
-      // A fresh context that failed mid-create would otherwise leave orphaned
-      // objects. Never roll back when force-recreating over an existing context.
-      if (!alreadyExisted) {
-        await Promise.allSettled(writtenKeys.map(key => options.storage.deleteObject(key)));
+      // A fresh context that failed mid-create would otherwise leave orphaned objects.
+      // Data objects are per-attempt keys, so rolling back our own writes is always safe.
+      await Promise.allSettled(writtenKeys.map(key => options.storage.deleteObject(key)));
+      if (error instanceof StorageConditionError) {
+        throw new ContextSDKError(`context already exists: ${options.id}`);
       }
       throw error;
+    }
+    if (options.force && alreadyExisted) {
+      // Force-recreate replaces a whole context: reclaim every historical data and
+      // checkpoint object from the old incarnation, not just the prior current keys.
+      await pruneContextDataObjects(options.storage, options.id, new Set([dataKeys.tree, dataKeys.image]));
+    } else {
+      await gcSupersededDataObjects(options.storage, options.id, previousManifest, manifest);
     }
     return manifest;
   } finally {
@@ -137,19 +161,25 @@ export async function attachContext(options: AttachContextOptions): Promise<Moun
   });
 
   const tempDir = await mkdtemp(join(tmpdir(), "contextsdk-attach-"));
+  const commandTimeoutMs = options.commandTimeoutMs ?? defaultCommandTimeoutMs;
   try {
     const encryptedPath = join(tempDir, "current.img.enc");
     const rawPath = join(tempDir, "current.img");
     const treeEncryptedPath = join(tempDir, "current.tree.tar.zst.enc");
     const treePath = join(tempDir, "current.tree.tar.zst");
     const treeRoot = join(tempDir, "tree");
-    const useDirectoryBundle = Boolean(options.runtime.capabilities?.directoryBundle) && !options.runtime.capabilities?.loopExt4;
+    // Tree contexts attach via the unprivileged directory-bundle path whenever the
+    // runtime supports it: it needs no host ext4 tooling and no loop devices. The
+    // loop-ext4 path is reserved for contexts whose current data is an ext4 image.
+    const useDirectoryBundle = Boolean(options.runtime.capabilities?.directoryBundle)
+      && (manifest.format === "tree" || !options.runtime.capabilities?.loopExt4);
     if (useDirectoryBundle || manifest.format === "tree") {
       await writeFile(treeEncryptedPath, await options.storage.getObject(manifest.treeKey), { mode: 0o600 });
       await decryptFile(treeEncryptedPath, treePath, manifest.treeEncryption ?? manifest.encryption, options.encryption);
       if (useDirectoryBundle) {
+        await assertSafeArchive(treePath);
         await options.runtime.uploadFile(treePath, remoteTreePath);
-        const mountResult = await options.runtime.run(unpackBundleScript(remoteTreePath, mountPath, manifest.persistencePolicy), { user: "root" });
+        const mountResult = await options.runtime.run(unpackBundleScript(remoteTreePath, mountPath, manifest.persistencePolicy), { user: "root", timeoutMs: commandTimeoutMs });
         assertSuccess(mountResult, "mount context bundle");
         return {
           id: options.id,
@@ -163,7 +193,15 @@ export async function attachContext(options: AttachContextOptions): Promise<Moun
         };
       }
       await unpackContextTree({ archivePath: treePath, destination: treeRoot });
-      const sizeBytes = manifest.sizeBytes && manifest.sizeBytes > 8 * 1024 * 1024 ? manifest.sizeBytes : 256 * 1024 * 1024;
+      // Size the image from the decompressed tree: manifest.sizeBytes for tree contexts
+      // records the zstd-compressed bundle, which can be many times smaller than the
+      // data mkfs.ext4 -d has to lay out.
+      const treeBytes = await directorySizeBytes(treeRoot);
+      const sizeBytes = Math.max(
+        manifest.format === "ext4" ? manifest.sizeBytes ?? 0 : 0,
+        Math.ceil(treeBytes * 1.5) + 64 * 1024 * 1024,
+        256 * 1024 * 1024,
+      );
       await createExt4Image({ imagePath: rawPath, stagingDir: treeRoot, sizeBytes, contextId: options.id, useExistingStagingDir: true });
     } else {
       await writeFile(encryptedPath, await options.storage.getObject(manifest.imageKey), { mode: 0o600 });
@@ -171,8 +209,8 @@ export async function attachContext(options: AttachContextOptions): Promise<Moun
       await validateExt4Image(rawPath);
     }
     await options.runtime.uploadFile(rawPath, remotePath);
-    assertSuccess(await options.runtime.run(ensureRuntimeToolsScript(), { user: "root" }), "runtime tool check");
-    const mountResult = await options.runtime.run(mountScript(remotePath, mountPath), { user: "root" });
+    assertSuccess(await options.runtime.run(ensureRuntimeToolsScript(), { user: "root", timeoutMs: commandTimeoutMs }), "runtime tool check");
+    const mountResult = await options.runtime.run(mountScript(remotePath, mountPath), { user: "root", timeoutMs: commandTimeoutMs });
     assertSuccess(mountResult, "mount context");
     const mounted: MountedContext = {
       id: options.id,
@@ -199,14 +237,16 @@ export async function saveContext(options: SaveContextOptions): Promise<ContextM
     // writer's data. Callers without an owner (manual CLI saves) skip this check.
     await assertLockOwnership({ storage: options.storage, contextId: options.id, owner: options.owner });
   }
-  const manifest = await readManifest(options.storage, options.id);
+  const { manifest, etag: manifestEtag } = await readManifestWithMeta(options.storage, options.id);
   const mountPath = options.mountPath ?? options.runtime.defaultMountPath?.(options.id) ?? defaultMountPath(options.id);
   const remotePath = remoteImagePath(options.id);
   const remoteTreePath = remoteBundlePath(options.id);
+  const commandTimeoutMs = options.commandTimeoutMs ?? defaultCommandTimeoutMs;
   const tempDir = await mkdtemp(join(tmpdir(), "contextsdk-save-"));
   try {
     const persistencePolicy = resolvePersistencePolicy(options.persistencePolicy ?? manifest.persistencePolicy);
     const nextGeneration = manifest.generation + 1;
+    const dataKeys = generationDataKeys(options.id, nextGeneration, randomBytes(4).toString("hex"));
     const version = await snapshotContextVersion({
       runtime: options.runtime,
       mountPath,
@@ -215,9 +255,10 @@ export async function saveContext(options: SaveContextOptions): Promise<ContextM
       author: options.author ?? options.owner ?? "contextsdk",
       message: options.message ?? "save context",
       policy: persistencePolicy,
+      timeoutMs: commandTimeoutMs,
     });
     await options.runtime.flush?.(mountPath);
-    assertSuccess(await options.runtime.run(packBundleScript(remoteTreePath, mountPath, persistencePolicy), { user: "root" }), "pack context tree");
+    assertSuccess(await options.runtime.run(packBundleScript(remoteTreePath, mountPath, persistencePolicy), { user: "root", timeoutMs: commandTimeoutMs }), "pack context tree");
     const treePath = join(tempDir, "current.tree.tar.zst");
     const encryptedTreePath = join(tempDir, "current.tree.tar.zst.enc");
     await options.runtime.downloadFile(remoteTreePath, treePath);
@@ -226,10 +267,17 @@ export async function saveContext(options: SaveContextOptions): Promise<ContextM
     const encryptedPath = join(tempDir, "current.img.enc");
     let imageEncryption = manifest.imageEncryption;
     let sizeBytes = (await stat(treePath)).size;
-    const isDirectoryBundle = Boolean(options.runtime.capabilities?.directoryBundle) && !options.runtime.capabilities?.loopExt4;
-    const shouldPersistExt4Image = !isDirectoryBundle && (manifest.format === "ext4" || Boolean(manifest.imageEncryption));
-    if (!isDirectoryBundle) {
-      assertSuccess(await options.runtime.run(saveScript(remotePath, mountPath), { user: "root" }), "save context");
+    // Mirror the attach-time mount-mode decision; session callers pass the actual
+    // mounted mode so a re-derivation can never disagree with what attach did.
+    const mode = options.mode ?? (
+      Boolean(options.runtime.capabilities?.directoryBundle) && (manifest.format === "tree" || !options.runtime.capabilities?.loopExt4)
+        ? "directoryBundle"
+        : "loopExt4"
+    );
+    const isLoopMounted = mode === "loopExt4";
+    const shouldPersistExt4Image = isLoopMounted && (manifest.format === "ext4" || Boolean(manifest.imageEncryption));
+    if (isLoopMounted) {
+      assertSuccess(await options.runtime.run(saveScript(remotePath, mountPath), { user: "root", timeoutMs: commandTimeoutMs }), "save context");
       if (shouldPersistExt4Image) {
         await options.runtime.downloadFile(remotePath, rawPath);
         await validateExt4Image(rawPath);
@@ -247,6 +295,8 @@ export async function saveContext(options: SaveContextOptions): Promise<ContextM
       format: keepExt4Format ? "ext4" : "tree",
       filesystem: keepExt4Format ? "ext4" : "tree",
       generation: nextGeneration,
+      treeKey: dataKeys.tree,
+      imageKey: shouldPersistExt4Image && imageEncryption ? dataKeys.image : manifest.imageKey,
       encryption: treeEncryption,
       treeEncryption,
       imageEncryption,
@@ -257,11 +307,38 @@ export async function saveContext(options: SaveContextOptions): Promise<ContextM
       updatedAt: new Date().toISOString(),
       sizeBytes,
     };
-    await options.storage.putObject(manifest.treeKey, await readFile(encryptedTreePath));
-    if (shouldPersistExt4Image && imageEncryption) {
-      await options.storage.putObject(manifest.imageKey, await readFile(encryptedPath));
+    // Commit protocol: data objects land under fresh per-generation keys first, then a
+    // single conditional manifest write flips to them. A crash before the manifest write
+    // leaves the previous generation fully intact; a manifest that exists always points
+    // at ciphertext its recorded encryption metadata can decrypt.
+    const writtenKeys: string[] = [];
+    try {
+      await options.storage.putObject(dataKeys.tree, await readFile(encryptedTreePath));
+      writtenKeys.push(dataKeys.tree);
+      if (shouldPersistExt4Image && imageEncryption) {
+        await options.storage.putObject(dataKeys.image, await readFile(encryptedPath));
+        writtenKeys.push(dataKeys.image);
+      }
+      if (options.owner) {
+        // Re-assert at the commit point: the check at entry can be minutes stale after
+        // packing and encrypting a large tree.
+        await assertLockOwnership({ storage: options.storage, contextId: options.id, owner: options.owner });
+      }
+      await options.storage.putObject(
+        contextKeys(options.id).manifest,
+        JSON.stringify(updated, null, 2),
+        manifestEtag ? { ifMatch: manifestEtag } : {},
+      );
+    } catch (error) {
+      await Promise.allSettled(writtenKeys.map(key => options.storage.deleteObject(key)));
+      if (error instanceof StorageConditionError) {
+        throw new ContextLockError(
+          `context manifest for ${options.id} changed during save (concurrent writer or lock takeover); save aborted`,
+        );
+      }
+      throw error;
     }
-    await options.storage.putObject(contextKeys(options.id).manifest, JSON.stringify(updated, null, 2));
+    await gcSupersededDataObjects(options.storage, options.id, manifest, updated);
     if (options.cleanupRemote ?? true) {
       await options.runtime.run(`rm -f ${shellQuote(remotePath)} ${shellQuote(remoteTreePath)}`, { user: "root" });
     }
@@ -275,12 +352,14 @@ export async function detachContext(options: DetachContextOptions): Promise<void
   const mountPath = options.mountPath ?? options.runtime.defaultMountPath?.(options.id) ?? defaultMountPath(options.id);
   const remotePath = remoteImagePath(options.id);
   const remoteTreePath = remoteBundlePath(options.id);
-  const isDirectoryBundle = Boolean(options.runtime.capabilities?.directoryBundle) && !options.runtime.capabilities?.loopExt4;
+  const isDirectoryBundle = options.mode
+    ? options.mode === "directoryBundle"
+    : Boolean(options.runtime.capabilities?.directoryBundle) && !options.runtime.capabilities?.loopExt4;
   await options.runtime.run(
     isDirectoryBundle
       ? detachDirectoryScript(remoteTreePath, mountPath, options.cleanupRemote ?? true)
       : detachScript(remotePath, mountPath, options.cleanupRemote ?? true),
-    { user: "root" },
+    { user: "root", timeoutMs: options.commandTimeoutMs ?? defaultCommandTimeoutMs },
   );
   await releaseLock({
     storage: options.storage,
@@ -300,14 +379,15 @@ export async function withContext<T>(
     contextId: options.id,
     owner: mounted.owner,
     lockTtlMs: options.lockTtlMs,
+    runtime: options.runtime,
   });
   try {
     const result = await fn(mounted);
-    await saveContext({ ...options, owner: mounted.owner, mountPath: mounted.mountPath });
+    await saveContext({ ...options, owner: mounted.owner, mountPath: mounted.mountPath, mode: mounted.mode });
     return result;
   } finally {
     lockRenewal.stop();
-    await detachContext({ storage: options.storage, runtime: options.runtime, id: options.id, owner: mounted.owner, mountPath: mounted.mountPath }).catch(error => {
+    await detachContext({ storage: options.storage, runtime: options.runtime, id: options.id, owner: mounted.owner, mountPath: mounted.mountPath, mode: mounted.mode }).catch(error => {
       process.emitWarning(`contextSDK: detach failed for ${options.id}: ${error instanceof Error ? error.message : String(error)}`);
     });
     await rm(mounted.localTempDir, { recursive: true, force: true });
@@ -348,6 +428,7 @@ export async function saveContextSession(
     runtime: session.runtime,
     mountPath: session.mountPath,
     owner: session.owner,
+    mode: session.mounted.mode,
   }));
 }
 
@@ -371,14 +452,15 @@ async function checkpointContextSessionInner(
   if (session.owner) {
     await assertLockOwnership({ storage: options.storage, contextId: session.id, owner: session.owner });
   }
-  const manifest = await readManifest(options.storage, session.id);
+  const { manifest, etag: manifestEtag } = await readManifestWithMeta(options.storage, session.id);
   const persistencePolicy = resolvePersistencePolicy(options.persistencePolicy ?? manifest.persistencePolicy);
   const keys = contextKeys(session.id);
   const tempDir = await mkdtemp(join(tmpdir(), "contextsdk-checkpoint-"));
   const remoteTreePath = remoteBundlePath(session.id);
+  const commandTimeoutMs = options.commandTimeoutMs ?? defaultCommandTimeoutMs;
   try {
     await session.runtime.flush?.(session.mountPath);
-    assertSuccess(await session.runtime.run(packBundleScript(remoteTreePath, session.mountPath, persistencePolicy), { user: "root" }), "checkpoint context tree");
+    assertSuccess(await session.runtime.run(packBundleScript(remoteTreePath, session.mountPath, persistencePolicy), { user: "root", timeoutMs: commandTimeoutMs }), "checkpoint context tree");
     const treePath = join(tempDir, "checkpoint.tree.tar.zst");
     const encryptedTreePath = join(tempDir, "checkpoint.tree.tar.zst.enc");
     await session.runtime.downloadFile(remoteTreePath, treePath);
@@ -393,12 +475,16 @@ async function checkpointContextSessionInner(
       sizeBytes: (await stat(treePath)).size,
     };
     const encrypted = await readFile(encryptedTreePath);
+    // The checkpoint object becomes the context's current tree by pointer flip; writing
+    // the bytes a second time at the old treeKey would reintroduce the in-place
+    // overwrite that can strand a manifest with stale encryption metadata.
     const updated: ContextManifest = {
       ...manifest,
       format: "tree",
       filesystem: "tree",
       checkpointGeneration,
       latestCheckpoint: checkpoint,
+      treeKey: checkpoint.treeKey,
       encryption: treeEncryption,
       treeEncryption,
       persistencePolicy,
@@ -406,9 +492,26 @@ async function checkpointContextSessionInner(
       updatedAt: checkpoint.timestamp,
       sizeBytes: checkpoint.sizeBytes,
     };
-    await options.storage.putObject(checkpoint.treeKey, encrypted);
-    await options.storage.putObject(manifest.treeKey, encrypted);
-    await options.storage.putObject(keys.manifest, JSON.stringify(updated, null, 2));
+    try {
+      await options.storage.putObject(checkpoint.treeKey, encrypted);
+      if (session.owner) {
+        await assertLockOwnership({ storage: options.storage, contextId: session.id, owner: session.owner });
+      }
+      await options.storage.putObject(
+        keys.manifest,
+        JSON.stringify(updated, null, 2),
+        manifestEtag ? { ifMatch: manifestEtag } : {},
+      );
+    } catch (error) {
+      await options.storage.deleteObject(checkpoint.treeKey).catch(() => undefined);
+      if (error instanceof StorageConditionError) {
+        throw new ContextLockError(
+          `context manifest for ${session.id} changed during checkpoint (concurrent writer or lock takeover); checkpoint aborted`,
+        );
+      }
+      throw error;
+    }
+    await gcSupersededDataObjects(options.storage, session.id, manifest, updated);
     return updated;
   } finally {
     await rm(tempDir, { recursive: true, force: true });
@@ -426,6 +529,7 @@ export async function endContextSession(
       runtime: session.runtime,
       mountPath: session.mountPath,
       owner: session.owner,
+      mode: session.mounted.mode,
     });
   } finally {
     // The temp dir holds decrypted context data; it must go even when detach fails.
@@ -449,6 +553,7 @@ export async function runWithContext<T>(
     contextId: options.id,
     owner: session.owner,
     lockTtlMs: options.lockTtlMs,
+    runtime,
   });
   const signalFinalizer = installSignalFinalizer(async signal => {
     checkpointTimer.stop();
@@ -499,8 +604,9 @@ export async function runWithContext<T>(
         persistencePolicy: options.persistencePolicy,
         runtimeState: options.runtimeState,
       }).catch(() => undefined);
-      shouldSave = false;
     }
+    // saveOnError: false means exactly that — the finally block must not save either.
+    shouldSave = false;
     throw error;
   } finally {
     checkpointTimer.stop();
@@ -558,8 +664,9 @@ export async function snapshotContextVersion(options: {
   author: string;
   message: string;
   policy?: Parameters<typeof snapshotScript>[0]["policy"];
+  timeoutMs?: number;
 }): Promise<ContextVersionRecord> {
-  const result = await options.runtime.run(snapshotScript(options), { user: "root" });
+  const result = await options.runtime.run(snapshotScript(options), { user: "root", timeoutMs: options.timeoutMs ?? defaultCommandTimeoutMs });
   assertSuccess(result, "snapshot context version");
   const line = result.stdout.split("\n").find(line => line.startsWith("CONTEXTSDK_VERSION_JSON="));
   if (!line) {
@@ -570,6 +677,75 @@ export async function snapshotContextVersion(options: {
 
 export async function readManifest(storage: { getObject(key: string): Promise<Buffer> }, id: string): Promise<ContextManifest> {
   return normalizeManifest(JSON.parse((await storage.getObject(contextKeys(id).manifest)).toString("utf8")), id);
+}
+
+/**
+ * Reads the manifest together with its storage ETag so writers can commit with
+ * compare-and-swap. An adapter that returns no ETag degrades to unconditional
+ * writes guarded only by the lock-ownership assertion.
+ */
+async function readManifestWithMeta(
+  storage: Pick<StorageAdapter, "getObjectWithMetadata">,
+  id: string,
+): Promise<{ manifest: ContextManifest; etag?: string }> {
+  const { body, metadata } = await storage.getObjectWithMetadata(contextKeys(id).manifest);
+  return { manifest: normalizeManifest(JSON.parse(body.toString("utf8")), id), etag: metadata.etag };
+}
+
+/**
+ * Best-effort cleanup of data objects a committed manifest no longer references.
+ * Only generation-scoped and legacy "current.*" keys are eligible; checkpoint
+ * history is never collected here.
+ */
+async function gcSupersededDataObjects(
+  storage: Pick<StorageAdapter, "deleteObject">,
+  id: string,
+  previous: ContextManifest | null | undefined,
+  current: ContextManifest,
+): Promise<void> {
+  if (!previous) {
+    return;
+  }
+  const stale = new Set<string>();
+  for (const key of [previous.treeKey, previous.imageKey]) {
+    if (key && key !== current.treeKey && key !== current.imageKey && isReplaceableDataKey(id, key)) {
+      stale.add(key);
+    }
+  }
+  if (stale.size === 0) {
+    return;
+  }
+  const results = await Promise.allSettled([...stale].map(key => storage.deleteObject(key)));
+  for (const result of results) {
+    if (result.status === "rejected") {
+      process.emitWarning(`contextSDK: failed to delete superseded object for ${id}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
+    }
+  }
+}
+
+/**
+ * Deletes every tree/image/checkpoint data object for a context except the keys
+ * in `keep`. Requires a listing-capable storage adapter; on adapters without
+ * listObjects this is a no-op (the caller has already overwritten the current
+ * objects, so only historical generations leak, which a later prune can reclaim).
+ */
+async function pruneContextDataObjects(
+  storage: Pick<StorageAdapter, "deleteObject"> & Partial<Pick<StorageAdapter, "listObjects">>,
+  id: string,
+  keep: Set<string>,
+): Promise<void> {
+  if (!storage.listObjects) {
+    return;
+  }
+  const prefixes = [`contexts/${id}/tree/`, `contexts/${id}/image/`, `contexts/${id}/checkpoints/`];
+  const listings = await Promise.all(prefixes.map(prefix => storage.listObjects!(prefix).catch(() => [] as string[])));
+  const victims = listings.flat().filter(key => !keep.has(key));
+  const results = await Promise.allSettled(victims.map(key => storage.deleteObject(key)));
+  for (const result of results) {
+    if (result.status === "rejected") {
+      process.emitWarning(`contextSDK: failed to prune object for ${id}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
+    }
+  }
 }
 
 export async function statusContext(options: {
@@ -639,16 +815,21 @@ function startCheckpointTimer(session: ContextSession, options: RunWithContextOp
 /**
  * Keeps the storage-backed lock alive for long sessions. Without renewal a
  * session outliving the lock TTL silently loses exclusivity and another writer
- * can take over mid-run.
+ * can take over mid-run. The same heartbeat drives the runtime's keepAlive so
+ * countdown-based sandboxes (E2B, Vercel) are not killed mid-session either.
  */
 function startLockRenewalTimer(options: {
   storage: StorageAdapter;
   contextId: string;
   owner: string;
   lockTtlMs?: number;
+  runtime?: RuntimeAdapter;
 }): { stop(): void } {
   const ttlMs = options.lockTtlMs ?? defaultLockTtlMs;
-  const intervalMs = Math.max(Math.floor(ttlMs / 3), 30_000);
+  // Cadence must stay below BOTH the lock TTL and the sandbox lifetime: a large
+  // lockTtlMs must not let the keepAlive fire after the sandbox has been auto-killed.
+  const sandboxInterval = options.runtime?.sandboxTimeoutMs ? Math.floor(options.runtime.sandboxTimeoutMs / 3) : Infinity;
+  const intervalMs = Math.max(Math.min(Math.floor(ttlMs / 3), sandboxInterval), 30_000);
   let warned = false;
   const timer = setInterval(() => {
     renewLock({
@@ -660,6 +841,12 @@ function startLockRenewalTimer(options: {
       if (!warned) {
         warned = true;
         process.emitWarning(`contextSDK: lock renewal failed for ${options.contextId}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    });
+    options.runtime?.keepAlive?.().catch(error => {
+      if (!warned) {
+        warned = true;
+        process.emitWarning(`contextSDK: runtime keep-alive failed for ${options.contextId}: ${error instanceof Error ? error.message : String(error)}`);
       }
     });
   }, intervalMs);
@@ -687,12 +874,27 @@ async function updateManifestRuntimeState(
   id: string,
   runtimeState: RuntimeStateMetadata,
 ): Promise<void> {
-  const manifest = await readManifest(storage, id);
-  await storage.putObject(contextKeys(id).manifest, JSON.stringify({
-    ...manifest,
-    runtimeState,
-    updatedAt: new Date().toISOString(),
-  }, null, 2));
+  // Runtime-state metadata is a small follow-up write that can race a save from
+  // another process; re-read and retry on CAS conflict instead of clobbering.
+  for (let attempt = 0; ; attempt++) {
+    const { manifest, etag } = await readManifestWithMeta(storage, id);
+    try {
+      await storage.putObject(contextKeys(id).manifest, JSON.stringify({
+        ...manifest,
+        runtimeState,
+        updatedAt: new Date().toISOString(),
+      }, null, 2), etag ? { ifMatch: etag } : {});
+      return;
+    } catch (error) {
+      if (error instanceof StorageConditionError && attempt < 4) {
+        continue;
+      }
+      // Runtime-state metadata (e.g. Vercel snapshot ids) is best-effort, but a
+      // silent loss should at least be observable.
+      process.emitWarning(`contextSDK: runtime-state update for ${id} lost to contention: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
+  }
 }
 
 function installSignalFinalizer(onSignal: (signal: NodeJS.Signals) => Promise<void>): { dispose(): void } {

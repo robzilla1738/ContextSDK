@@ -1,6 +1,6 @@
 {
   "name": "@contextsdk/adapter-e2b",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "E2B runtime adapter for contextSDK",
   "license": "MIT",
   "type": "module",
@@ -39,10 +39,16 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@contextsdk/core": "^0.2.0",
-    "e2b": "^1.11.0"
+    "e2b": "^2.27.1"
   },
   "engines": {
     "node": ">=20.0.0"
+  },
+  "sideEffects": false,
+  "peerDependencies": {
+    "@contextsdk/core": "^0.3.0"
+  },
+  "devDependencies": {
+    "@contextsdk/core": "^0.3.0"
   }
 }

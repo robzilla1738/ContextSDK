@@ -2,10 +2,13 @@
 
 Goal: seed a context with synthetic project data, mount it in E2B, and hand another AI only the runtime prompt.
 
+No S3 bucket is required: with `CONTEXTSDK_S3_*` unset, the context lives in the local store at `~/.contextsdk/storage`. Set the S3 variables only when you want shared, multi-machine storage.
+
 ```bash
 export E2B_API_KEY="..."
-export CONTEXTSDK_S3_BUCKET="agent-contexts"
 export CONTEXTSDK_PASSPHRASE="..."
+# Optional, for shared storage:
+# export CONTEXTSDK_S3_BUCKET="agent-contexts"
 
 node packages/cli/dist/cli.js test blind-retrieval meridian-demo \
   --runtime e2b \

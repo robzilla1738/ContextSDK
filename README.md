@@ -1,90 +1,100 @@
 # contextSDK
 
+[![CI](https://github.com/robzilla1738/ContextSDK/actions/workflows/ci.yml/badge.svg)](https://github.com/robzilla1738/ContextSDK/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/%40contextsdk%2Fcore)](https://www.npmjs.com/org/contextsdk)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![node](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](package.json)
+
 contextSDK gives agents a real filesystem that survives disposable sandboxes and VMs.
 
-Agent runtimes should usually be temporary. That is safer, but it makes continuity hard. contextSDK keeps the compute disposable and stores the agent's working state separately as an encrypted portable bundle.
-
-The default storage object is:
-
-- `contexts/<contextId>/current.tree.tar.zst.enc`
-
-Each context also has:
-
-- `contexts/<contextId>/manifest.json`
-- `contexts/<contextId>/lock.json`
-- `contexts/<contextId>/checkpoints/<generation>.tree.tar.zst.enc`
-
-E2B and SSH-style runtimes can also keep a raw ext4 image for loop mounting:
-
-- `contexts/<contextId>/current.img.enc`
+Agent runtimes should usually be temporary. That is safer, but it makes continuity hard. contextSDK keeps the compute disposable and stores the agent's working state separately as an encrypted portable bundle that moves across E2B, Vercel Sandbox, Modal, and SSH hosts.
 
 Inside the runtime, the agent gets the same folders every time: `/workspace`, `/memory`, `/artifacts`, `/logs`, `/cache`, and `/config`.
+
+## Quick start
+
+No cloud bucket required — without S3 configuration, contexts live encrypted in a local store (`~/.contextsdk/storage`):
+
+```bash
+npm install -g @contextsdk/cli @contextsdk/core @contextsdk/adapter-e2b @contextsdk/adapter-vercel @contextsdk/adapter-modal
+export CONTEXTSDK_PASSPHRASE="choose-a-strong-passphrase"
+contextsdk doctor
+
+# Run a command in an E2B sandbox with a persistent context:
+export E2B_API_KEY="..."
+contextsdk run my-agent --runtime e2b --create-if-missing -- sh -lc 'echo hello > /workspace/state.txt'
+
+# A different sandbox — even a different provider — sees the same state:
+contextsdk run my-agent --runtime e2b -- cat /workspace/state.txt
+```
+
+### Prerequisites
+
+- Node.js >= 20. The packages are ESM-only (`import`; no `require`).
+- A POSIX host: macOS, Linux, or WSL. The control plane shells out to `tar`, `zstd`, and `python3`.
+- `e2fsprogs` (`mkfs.ext4`, `e2fsck`) **only** if you use the optional `--format ext4` contexts. The default tree format never needs it. macOS: `brew install e2fsprogs`.
+
+### Provider credentials
+
+| Provider | Credentials |
+| --- | --- |
+| E2B | `E2B_API_KEY` ([dashboard](https://e2b.dev/dashboard)) |
+| Vercel | `VERCEL_TOKEN` + `VERCEL_TEAM_ID` + `VERCEL_PROJECT_ID`, **or** `VERCEL_OIDC_TOKEN` (from `vercel link` + `vercel env pull`, expires ~12h) |
+| Modal | `~/.modal.toml` (from `modal token new`) or `MODAL_TOKEN_ID` + `MODAL_TOKEN_SECRET` |
+| SSH | Plain `ssh`/`scp` with key auth; the remote host needs `bash`, `tar`, `zstd`, `python3`, and passwordless `sudo` for root operations |
+
+`contextsdk doctor` reports which credentials and tools it can see without printing secret values.
 
 ## Two-layer state
 
 contextSDK splits state into two layers:
 
-- Portable context: encrypted user and agent state that can move across E2B, Vercel, Modal, and SSH.
-- Runtime state: provider-specific machine state such as installed packages, `node_modules`, virtualenvs, language caches, and build output.
+- **Portable context**: encrypted user and agent state that moves across providers. Defaults to `/workspace`, `/memory`, `/artifacts`, `/logs`, and `/config`.
+- **Runtime state**: provider-specific machine state — installed packages, `node_modules`, virtualenvs, language caches, build output, and `/cache`. These are expensive to push through object storage and are better served by provider persistence (Vercel named sandboxes, Modal volumes).
 
-The portable bundle defaults to `/workspace`, `/memory`, `/artifacts`, `/logs`, and `/config`. It leaves out `/cache`, `node_modules`, package stores, virtualenvs, `.next`, `dist`, and `build` output. Those paths are expensive to push through object storage and are better handled by provider persistence or snapshots.
+The portable bundle excludes `node_modules`, package stores, virtualenvs, `.next`, `dist`, and `build` output by default, and re-attach never wipes provider runtime state outside the managed roots.
 
-Vercel is the first runtime-state implementation. By default, contextSDK uses a persistent named Vercel Sandbox named `contextsdk-<contextId>`. The encrypted context still comes from cloud storage at session start and is saved back at the end. Dependencies stay warm in the sandbox. User and agent context stays portable.
+## Storage layout
+
+```text
+contexts/<contextId>/manifest.json                          # commit point; references current data
+contexts/<contextId>/lock.json                              # single-writer lock (conditional writes)
+contexts/<contextId>/tree/<generation>-<attempt>.tree.tar.zst.enc
+contexts/<contextId>/image/<generation>-<attempt>.img.enc   # explicit ext4 contexts only
+contexts/<contextId>/checkpoints/<n>.tree.tar.zst.enc
+```
+
+Bundles are written under fresh generation-scoped keys and the manifest write is the atomic commit, so an interrupted save can never corrupt the previous generation. Contexts created by older releases (fixed `current.*` keys) are read transparently and migrate on their next save.
 
 ## Packages
 
-- `@contextsdk/core`: storage, encryption, locks, manifests, checkpoints, file APIs.
+- `@contextsdk/core`: storage, encryption, locks, manifests, checkpoints, file APIs, SSH adapter.
 - `@contextsdk/cli`: the `contextsdk` command.
-- `@contextsdk/adapter-e2b`: E2B loop-mounted ext4 support.
-- `@contextsdk/adapter-vercel`: Vercel Sandbox directory-bundle support.
+- `@contextsdk/adapter-e2b`: E2B sandboxes (e2b SDK v2).
+- `@contextsdk/adapter-vercel`: Vercel Sandbox with persistent named sandboxes.
 - `@contextsdk/adapter-modal`: Modal Sandbox and Volume support.
 
-## Install
+Adapters declare `@contextsdk/core` as a peer dependency; npm 7+ installs it automatically.
 
-Published packages:
-
-```bash
-npm install @contextsdk/core
-npm install @contextsdk/core @contextsdk/adapter-vercel
-npm install @contextsdk/core @contextsdk/adapter-e2b
-npm install @contextsdk/core @contextsdk/adapter-modal
-npm install -g @contextsdk/cli
-```
-
-Published on npm now (install verified):
-
-- `@contextsdk/core@0.2.0`
-- `@contextsdk/adapter-e2b@0.2.0`
-- `@contextsdk/adapter-vercel@0.2.0`
-- `@contextsdk/adapter-modal@0.2.0`
-- `@contextsdk/cli@0.2.0`
-
-The 0.2.0 release hardens lock acquisition with conditional writes, adds lock renewal for long sessions, records scrypt parameters in encryption metadata (with a stronger default), validates symlink and hardlink entries in bundles, and bounds manifest version history. Compatibility note: bundles encrypted by 0.2.0 with the new default scrypt parameters cannot be decrypted by 0.1.0; 0.2.0 reads 0.1.0 bundles fine.
-
-Local development:
-
-```bash
-npm install
-npm run build
-```
-
-Local CLI:
-
-```bash
-node packages/cli/dist/cli.js --help
-```
+Published on npm: `0.2.0` (install verified 2026-06-05). The repository tracks `0.3.0` (unreleased); see [CHANGELOG.md](CHANGELOG.md) for what changed, including one CLI breaking change (`contextsdk run` output).
 
 ## Configure
 
-For a quick trial, use environment variables:
+Storage resolution order: explicit S3 (env or config) → explicit local directory → `~/.contextsdk/storage`.
 
 ```bash
+# Local store (default): nothing to configure, or pick a directory:
+export CONTEXTSDK_STORAGE_DIR="/srv/contexts"
+
+# S3-compatible storage (AWS S3, Cloudflare R2, MinIO) for multi-machine use:
 export CONTEXTSDK_S3_BUCKET="agent-contexts"
 export CONTEXTSDK_S3_REGION="auto"
 export CONTEXTSDK_S3_ENDPOINT="https://<account>.r2.cloudflarestorage.com"
 export CONTEXTSDK_S3_ACCESS_KEY_ID="..."
 export CONTEXTSDK_S3_SECRET_ACCESS_KEY="..."
-export CONTEXTSDK_PASSPHRASE="..."
+
+# Encryption (always required):
+export CONTEXTSDK_PASSPHRASE="..."     # or CONTEXTSDK_KEY_HEX (raw 32-byte key, hex)
 ```
 
 For repeatable runs, copy the example config:
@@ -93,124 +103,66 @@ For repeatable runs, copy the example config:
 cp contextsdk.config.example.ts contextsdk.config.ts
 ```
 
-Example:
-
-```ts
-import type { ContextSDKConfig } from "@contextsdk/core";
-
-export default {
-  storage: {
-    type: "s3",
-    bucket: "agent-contexts",
-    region: "auto",
-    endpoint: "https://<account>.r2.cloudflarestorage.com",
-    forcePathStyle: true,
-  },
-  encryption: {
-    passphraseEnv: "CONTEXTSDK_PASSPHRASE",
-  },
-  defaultRuntime: "e2b",
-  defaultFormat: "tree",
-  runtimeState: "auto",
-  persistence: {
-    roots: ["workspace", "memory", "artifacts", "logs", "config"],
-  },
-  checkpoint: {
-    intervalMs: 300000,
-  },
-  providers: {
-    vercel: { runtime: "python3.13", persistent: true, snapshotExpirationMs: 1209600000, keepLastSnapshots: 3 },
-    modal: { appName: "contextsdk", imageTag: "python:3.13-slim", volumeName: "contextsdk-contexts" },
-  },
-} satisfies ContextSDKConfig;
-```
-
-Provider credentials stay in the environment. The CLI reads `E2B_API_KEY`, Vercel auth, Modal auth, and S3 credentials, but `doctor` does not print secret values.
+Provider credentials stay in the environment, never in config files or argv.
 
 ## CLI examples
 
-Check local setup:
-
 ```bash
-node packages/cli/dist/cli.js doctor
+contextsdk doctor                                  # check setup
+contextsdk init employee-robert                    # create a context
+contextsdk status employee-robert                  # manifest + lock state
+contextsdk verify employee-robert                  # stored objects exist and are encrypted
 ```
 
-Create a context:
+Run in E2B with periodic checkpoints:
 
 ```bash
-node packages/cli/dist/cli.js init employee-robert --format tree
+contextsdk run employee-robert --runtime e2b --create-if-missing --checkpoint-interval 5m -- sh -lc 'echo ok > /workspace/result.txt'
 ```
 
-Run in E2B, checkpoint every five minutes, save, detach, and shut the sandbox down:
+`run` prints the wrapped command's stdout/stderr and exits with its exit code. Pass `--json` for a machine-readable envelope.
+
+Move the same context to Vercel Sandbox:
 
 ```bash
-export E2B_API_KEY="..."
-node packages/cli/dist/cli.js run employee-robert --runtime e2b --create-if-missing --checkpoint-interval 5m -- sh -lc 'echo ok > /workspace/result.txt'
+contextsdk run employee-robert --runtime vercel -- sh -lc 'cat /workspace/result.txt'
 ```
 
-Run the same context in Vercel Sandbox:
+Use Vercel runtime state for dependency-heavy Node work (note the Node runtime image):
 
 ```bash
-node packages/cli/dist/cli.js run employee-robert --runtime vercel --create-if-missing -- sh -lc 'echo vercel >> /memory/session.md'
+contextsdk run employee-robert --runtime vercel --vercel-runtime node24 -- sh -lc 'cd /workspace && npm init -y && npm install is-odd'
+contextsdk run employee-robert --runtime vercel --vercel-runtime node24 -- sh -lc 'test -d /workspace/node_modules && echo deps survived'
 ```
 
-Use Vercel runtime state for dependency-heavy work:
-
-```bash
-node packages/cli/dist/cli.js run employee-robert --runtime vercel --create-if-missing -- sh -lc 'npm install && echo ok > /workspace/result.txt'
-node packages/cli/dist/cli.js run employee-robert --runtime vercel -- sh -lc 'test -d node_modules && cat /workspace/result.txt'
-```
-
-The second run resumes the same named sandbox by default. `node_modules` stays in Vercel provider state. `/workspace/result.txt` is saved in the encrypted portable context bundle. To force an ephemeral Vercel sandbox, pass `--runtime-state disabled --no-vercel-persistent`.
+The second run resumes the same named sandbox (`contextsdk-employee-robert`). `node_modules` stays in Vercel provider state and out of the portable bundle. To force an ephemeral sandbox, pass `--runtime-state disabled --no-vercel-persistent`. Note: stopped persistent sandboxes keep snapshots for 14 days by default (`--vercel-snapshot-expiration`); after expiry the sandbox comes back empty and only the portable context is restored.
 
 Run it in Modal:
 
 ```bash
-node packages/cli/dist/cli.js run employee-robert --runtime modal --create-if-missing -- sh -lc 'echo modal > /workspace/provider.txt'
+contextsdk run employee-robert --runtime modal -- sh -lc 'echo modal > /workspace/provider.txt'
 ```
 
-Probe a runtime before using it:
+Probe a runtime, or drive the lifecycle manually:
 
 ```bash
-node packages/cli/dist/cli.js probe --runtime e2b
-node packages/cli/dist/cli.js probe --runtime vercel
-node packages/cli/dist/cli.js probe --runtime modal
+contextsdk probe --runtime e2b
+contextsdk session start employee-robert --runtime e2b
+contextsdk files write employee-robert workspace/notes.txt "hello" --runtime e2b --sandbox-id <id>
+contextsdk session save employee-robert --runtime e2b --sandbox-id <id> --owner <owner-from-start>
+contextsdk session end employee-robert --runtime e2b --sandbox-id <id> --owner <owner-from-start>
 ```
 
-Manual lifecycle:
-
-```bash
-node packages/cli/dist/cli.js session start employee-robert --runtime e2b --create-if-missing
-node packages/cli/dist/cli.js files write employee-robert workspace/notes.txt "hello" --runtime e2b --sandbox-id <sandbox-id>
-node packages/cli/dist/cli.js session checkpoint employee-robert --runtime e2b --sandbox-id <sandbox-id> --reason "manual checkpoint"
-node packages/cli/dist/cli.js session save employee-robert --runtime e2b --sandbox-id <sandbox-id> --message "manual save"
-node packages/cli/dist/cli.js session end employee-robert --runtime e2b --sandbox-id <sandbox-id> --owner <owner-from-start>
-```
-
-Blind retrieval and crash-recovery trials:
-
-```bash
-node packages/cli/dist/cli.js test blind-retrieval demo --runtime e2b --prompt-out handoff.md --answer-out answer-key.md --execute
-node packages/cli/dist/cli.js test crash-recovery demo --runtime vercel --execute
-```
+The sandbox id for `--sandbox-id` is the suffix of `runtimeId` in `session start` output (`e2b:<sandbox-id>`).
 
 ## SDK example
 
 ```ts
-import { S3Storage, runWithContext } from "@contextsdk/core";
+import { FsStorage, runWithContext } from "@contextsdk/core";
 import { E2BProvisioner } from "@contextsdk/adapter-e2b";
 
-const storage = new S3Storage({
-  bucket: "agent-contexts",
-  clientConfig: {
-    region: "auto",
-    endpoint: "https://<account>.r2.cloudflarestorage.com",
-    credentials: {
-      accessKeyId: process.env.CONTEXTSDK_S3_ACCESS_KEY_ID!,
-      secretAccessKey: process.env.CONTEXTSDK_S3_SECRET_ACCESS_KEY!,
-    },
-  },
-});
+// FsStorage for local/single-machine use; swap in S3Storage for production.
+const storage = new FsStorage({ directory: `${process.env.HOME}/.contextsdk/storage` });
 
 await runWithContext({
   id: "agent-123",
@@ -218,7 +170,7 @@ await runWithContext({
   encryption: { passphrase: process.env.CONTEXTSDK_PASSPHRASE! },
   provisioner: new E2BProvisioner({ apiKey: process.env.E2B_API_KEY }),
   createIfMissing: true,
-  checkpoint: { intervalMs: 300000 },
+  checkpoint: { intervalMs: 300_000 },
   message: "agent session",
 }, async session => {
   await session.files.write("workspace/task.txt", "current task state\n");
@@ -228,67 +180,58 @@ await runWithContext({
 });
 ```
 
-`runWithContext` starts a checkpoint timer when configured. It also tries to save and clean up on `SIGINT` and `SIGTERM`. A hard kill can still lose work after the last checkpoint.
+`runWithContext` checkpoints on the configured interval, renews the single-writer lock, keeps the sandbox alive while the session runs, and saves and cleans up on `SIGINT`/`SIGTERM`. A hard kill can still lose work after the last checkpoint.
 
 ## How each runtime works
 
+All providers attach tree contexts (the default) through the unprivileged **directory-bundle** path: the encrypted bundle is decrypted locally, validated, uploaded, then stream-validated and extracted inside the runtime. Saves pack the managed roots in the runtime, download, encrypt locally, and commit to storage under a fresh generation key.
+
+Sandbox lifetimes: providers kill sandboxes after ~5 minutes by default. The adapters default to session-sized lifetimes instead (E2B 30 min, Vercel 45 min, Modal 60 min — all configurable), and the E2B/Vercel adapters extend the countdown while a session is actively running.
+
 E2B:
 
-- Turns the tree bundle into an ext4 image.
-- Uploads the image to the sandbox.
-- Mounts it with loop devices.
-- Checkpoints the mounted tree without unmounting.
-- On final save, stores the filtered tree bundle. Explicit ext4 contexts can also update the encrypted ext4 image.
+- Default tree contexts use the directory bundle; no ext4 tooling needed anywhere.
+- Explicit `--format ext4` contexts build the image on the host (requires `e2fsprogs`), upload it, and loop-mount it in the sandbox.
+- Transfers ride presigned URLs with retry/backoff against fresh-sandbox ingress flakiness.
 
 Vercel Sandbox:
 
-- Unpacks the tree bundle into `/vercel/sandbox/contextsdk/<id>`.
-- Exposes `/workspace`, `/memory`, `/artifacts`, `/logs`, `/cache`, and `/config`.
-- Saves by creating a tar+zstd bundle in the sandbox, downloading it, encrypting it locally, and uploading it to storage.
-- Uses persistent named sandboxes by default, so installed packages, package caches, and build outputs can survive without entering the portable bundle.
-- Stores runtime-state metadata in `manifest.json`, including the sandbox name and snapshot IDs when Vercel exposes them.
-- Provider persistence and snapshots are accelerators; the encrypted tree bundle remains the portable state.
+- Unpacks the bundle into `/vercel/sandbox/contextsdk/<id>`.
+- Uses persistent named sandboxes (`contextsdk-<id>`) by default so installed packages and build output survive between sessions without entering the portable bundle.
+- Records runtime-state metadata (sandbox name, snapshot ids) in the manifest.
 
 Modal:
 
-- Uses a Modal Sandbox with a Volume mounted at `/contextsdk` by default.
-- Keeps each context in its own subdirectory.
-- Runs `sync` before checkpoints and final saves.
-- Exports the same encrypted tree bundle so the context can move to another provider.
+- Modal Sandbox with a Volume mounted at `/contextsdk`, one subdirectory per context.
+- The volume accelerates re-attach; the encrypted tree bundle remains the portable source of truth.
+
+SSH:
+
+- Attach-only runtime for hosts you already manage; uses the directory-bundle path, `BatchMode` (never hangs on prompts), and `bash` for script execution.
 
 ## Security model
 
-- Bundles and images are encrypted with AES-256-GCM. Decryption authenticates the ciphertext; tampered data fails to decrypt.
-- Passphrase keys are derived with scrypt. New bundles record their scrypt parameters in metadata and default to `cost=131072, blockSize=8, parallelization=1`; bundles written before parameters were recorded decrypt with the legacy Node.js defaults. Raw 32-byte keys (`rawKeyHex`) skip derivation.
-- One active writer per context is enforced with storage-backed locks acquired through conditional writes (`If-None-Match` on create, ETag `If-Match` on expired-lock takeover). Sessions renew the lock at one third of its TTL, and saves verify lock ownership before writing.
-- Bundle extraction validates archive entries: path traversal, absolute paths, escaping symlink or hardlink targets, and special files (devices, FIFOs, sockets) are rejected.
-- Decrypted data exists in two places during a session: a private local temp directory (mode 0600/0700, removed when the session ends, including on detach failure) and the runtime itself, which must see plaintext to do work. Treat runtime compromise as context compromise for that session.
+- Bundles and images are encrypted with AES-256-GCM. Decryption authenticates the ciphertext; tampered data fails closed, partially written plaintext is removed, and metadata cannot downgrade the auth-tag or nonce length.
+- Passphrase keys derive via scrypt with parameters recorded in metadata (default `cost=131072, blockSize=8, parallelization=1`); legacy bundles decrypt with the recorded or legacy parameters. Raw 32-byte keys (`rawKeyHex`) skip derivation.
+- One active writer per context: storage-backed locks with conditional writes (`If-None-Match` create, ETag `If-Match` takeover), TTL/3 renewal, ownership re-assertion and manifest compare-and-swap at every commit point.
+- Archive safety is enforced on **both** sides of every transfer: path traversal, absolute paths, escaping symlink/hardlink targets, and special files are rejected, with entry-count and decompressed-size caps against decompression bombs.
+- Decrypted data exists in two places during a session: a private local temp directory (mode 0600/0700, removed even on failure) and the runtime itself, which must see plaintext to do work. Treat runtime compromise as context compromise for that session.
 - Secrets are read from the environment, never from argv. Use `contextsdk files write --stdin` to keep sensitive file content out of shell history.
+
+See [SECURITY.md](SECURITY.md) for the reporting policy.
 
 ## Enterprise shape
 
-The enterprise version puts a Context Broker in front of the SDK. The broker decides who can attach which context, enforces one active writer, records audit events, runs DLP or artifact scanning before save, and handles retention or legal hold.
+The enterprise version puts a Context Broker in front of the SDK. The broker decides who can attach which context, enforces one active writer, records audit events, runs DLP or artifact scanning before save, and handles retention or legal hold. See [docs/enterprise-rollout.md](docs/enterprise-rollout.md).
 
-Employees still get a normal agent experience. The platform gets policy, locks, versions, and a storage layout it can inspect.
-
-## Original ext4 validation
-
-The first proof scripts are still here:
+## Development
 
 ```bash
-python3 -m venv .venv && . .venv/bin/activate && python -m pip install -e .
-export E2B_API_KEY="..."
-python scripts/validate_portable_fs.py
-python scripts/validate_portable_fs.py --local-to-vm
-```
-
-## Checks
-
-```bash
+npm install
 npm run typecheck
 npm test
 npm run build
 node packages/cli/dist/cli.js doctor
-node packages/cli/dist/cli.js run --help
-node packages/cli/dist/cli.js probe --help
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). The original Python validation harness lives in `scripts/` (`pip install e2b httpx`, then `python3 scripts/validate_portable_fs.py`).
