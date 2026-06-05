@@ -1,0 +1,20 @@
+{
+  "name": "@contextsdk/core",
+  "version": "0.1.0",
+  "description": "Portable encrypted context state for AI sandboxes and VMs",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.940.0"
+  }
+}

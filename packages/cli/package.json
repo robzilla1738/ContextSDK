@@ -1,0 +1,30 @@
+{
+  "name": "@contextsdk/cli",
+  "version": "0.1.0",
+  "description": "CLI for portable encrypted context state",
+  "type": "module",
+  "bin": {
+    "contextsdk": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/cli.d.ts",
+      "import": "./dist/cli.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@contextsdk/adapter-e2b": "0.1.0",
+    "@contextsdk/adapter-modal": "0.1.0",
+    "@contextsdk/adapter-vercel": "0.1.0",
+    "@contextsdk/core": "0.1.0",
+    "commander": "^14.0.2",
+    "jiti": "^2.7.0"
+  }
+}

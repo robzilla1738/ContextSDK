@@ -1,0 +1,21 @@
+{
+  "name": "@contextsdk/adapter-modal",
+  "version": "0.1.0",
+  "description": "Modal Sandbox and Volume runtime adapter for contextSDK",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@contextsdk/core": "0.1.0",
+    "modal": "^0.7.6"
+  }
+}

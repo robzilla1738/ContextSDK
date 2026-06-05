@@ -1,0 +1,24 @@
+{
+  "name": "contextsdk-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Portable encrypted context filesystems for agent sandboxes and VMs",
+  "type": "module",
+  "workspaces": [
+    "packages/core",
+    "packages/adapter-e2b",
+    "packages/adapter-vercel",
+    "packages/adapter-modal",
+    "packages/cli"
+  ],
+  "scripts": {
+    "build": "npm run build -w @contextsdk/core && npm run build -w @contextsdk/adapter-e2b && npm run build -w @contextsdk/adapter-vercel && npm run build -w @contextsdk/adapter-modal && npm run build -w @contextsdk/cli",
+    "test": "vitest run",
+    "typecheck": "npm run build && tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.14"
+  }
+}

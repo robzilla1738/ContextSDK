@@ -1,0 +1,19 @@
+# Concurrent Lock Denial
+
+Goal: prove one active writer per context.
+
+Start a session and keep its owner/lock active:
+
+```bash
+npx contextsdk session start lock-demo --runtime e2b --create-if-missing
+```
+
+In another terminal, try to attach the same context:
+
+```bash
+npx contextsdk attach lock-demo --runtime vercel
+```
+
+Expected result: the second attach fails because `contexts/lock-demo/lock.json` already exists and has not expired.
+
+Only use `--force-unlock` when an operator has confirmed the prior runtime is dead or intentionally abandoned.
