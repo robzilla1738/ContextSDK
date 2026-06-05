@@ -97,10 +97,10 @@ Keep the sandbox temporary. Keep the work. Let provider snapshots handle the mac
 
 Published on npm (install verified):
 
-- `@contextsdk/core@0.1.0`
-- `@contextsdk/adapter-e2b@0.1.0`
-- `@contextsdk/adapter-vercel@0.1.0`
-- `@contextsdk/adapter-modal@0.1.0`
-- `@contextsdk/cli@0.1.0`
+- `@contextsdk/core@0.2.0`
+- `@contextsdk/adapter-e2b@0.2.0`
+- `@contextsdk/adapter-vercel@0.2.0`
+- `@contextsdk/adapter-modal@0.2.0`
+- `@contextsdk/cli@0.2.0`
 
-The repository is at `0.2.0` (unpublished), which hardens lock acquisition with conditional writes, adds lock renewal and save-time ownership checks, records scrypt parameters in encryption metadata, and validates symlink and special-file entries in bundles.
+The 0.2.0 release hardens lock acquisition with conditional writes, adds lock renewal and save-time ownership checks, records scrypt parameters in encryption metadata, and validates symlink and special-file entries in bundles.

@@ -72,15 +72,15 @@ SSH:
 
 ## Package Status
 
-Published on npm (install verified on 2026-06-04 via `npm install` in a clean directory):
+Published on npm (install verified on 2026-06-05 via `npm install` in a clean directory):
 
-- `@contextsdk/core@0.1.0`
-- `@contextsdk/adapter-e2b@0.1.0`
-- `@contextsdk/adapter-vercel@0.1.0`
-- `@contextsdk/adapter-modal@0.1.0`
-- `@contextsdk/cli@0.1.0`
+- `@contextsdk/core@0.2.0`
+- `@contextsdk/adapter-e2b@0.2.0`
+- `@contextsdk/adapter-vercel@0.2.0`
+- `@contextsdk/adapter-modal@0.2.0`
+- `@contextsdk/cli@0.2.0`
 
-The repository is at `0.2.0` (unpublished). 0.2.0 adds: conditional-write (ETag CAS) lock acquisition and renewal, lock-ownership assertion on save, scrypt parameters recorded in encryption metadata with a stronger default (cost 2^17), symlink/hardlink/special-file validation in bundles, bounded manifest version history, and CLI fixes (dynamic version, exit-code propagation, `files write --stdin`).
+0.2.0 adds: conditional-write (ETag CAS) lock acquisition and renewal, lock-ownership assertion on save, scrypt parameters recorded in encryption metadata with a stronger default (cost 2^17), symlink/hardlink/special-file validation in bundles, bounded manifest version history, and CLI fixes (dynamic version, exit-code propagation, `files write --stdin`).
 
 Compatibility note: bundles encrypted by 0.2.0 with the new default scrypt parameters cannot be decrypted by 0.1.0 (it ignores the recorded parameters). 0.2.0 reads 0.1.0 bundles fine.
 

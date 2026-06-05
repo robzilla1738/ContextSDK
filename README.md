@@ -53,13 +53,13 @@ npm install -g @contextsdk/cli
 
 Published on npm now (install verified):
 
-- `@contextsdk/core@0.1.0`
-- `@contextsdk/adapter-e2b@0.1.0`
-- `@contextsdk/adapter-vercel@0.1.0`
-- `@contextsdk/adapter-modal@0.1.0`
-- `@contextsdk/cli@0.1.0`
+- `@contextsdk/core@0.2.0`
+- `@contextsdk/adapter-e2b@0.2.0`
+- `@contextsdk/adapter-vercel@0.2.0`
+- `@contextsdk/adapter-modal@0.2.0`
+- `@contextsdk/cli@0.2.0`
 
-This repository is at `0.2.0` (unpublished). The 0.2.0 release hardens lock acquisition with conditional writes, adds lock renewal for long sessions, records scrypt parameters in encryption metadata (with a stronger default), validates symlink and hardlink entries in bundles, and bounds manifest version history. Note: `contextsdk --version` from the published 0.1.0 binary misreports `0.2.0`; that bug is fixed in this repo.
+The 0.2.0 release hardens lock acquisition with conditional writes, adds lock renewal for long sessions, records scrypt parameters in encryption metadata (with a stronger default), validates symlink and hardlink entries in bundles, and bounds manifest version history. Compatibility note: bundles encrypted by 0.2.0 with the new default scrypt parameters cannot be decrypted by 0.1.0; 0.2.0 reads 0.1.0 bundles fine.
 
 Local development:
 
