@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { ContextSDKError } from "./errors.js";
 import { defaultLayout } from "./paths.js";
+import { resolvePersistencePolicy } from "./persistence-policy.js";
+import type { ContextPersistencePolicy } from "./types.js";
 
 export interface PrepareContextTreeOptions {
   root: string;
@@ -13,6 +15,7 @@ export interface PrepareContextTreeOptions {
 export interface PackContextTreeOptions {
   root: string;
   archivePath: string;
+  policy?: Partial<ContextPersistencePolicy>;
 }
 
 export interface UnpackContextTreeOptions {
@@ -41,9 +44,12 @@ export async function prepareContextTree(options: PrepareContextTreeOptions): Pr
 export async function packContextTree(options: PackContextTreeOptions): Promise<void> {
   await requireTool("tar");
   await requireTool("zstd");
+  const policy = resolvePersistencePolicy(options.policy);
   await rm(options.archivePath, { force: true });
+  const items = await existingArchiveItems(options.root, policy);
+  const excludeArgs = policy.exclude.flatMap(pattern => ["--exclude", pattern]);
   await runPipeline([
-    { command: "tar", args: ["-C", options.root, "-cf", "-", "."] },
+    { command: "tar", args: ["-C", options.root, ...excludeArgs, "-cf", "-", ...items] },
     { command: "zstd", args: ["-T0", "-q", "-o", options.archivePath] },
   ]);
 }
@@ -83,7 +89,8 @@ export async function assertSafeArchive(archivePath: string): Promise<void> {
 async function writeTreeIndex(root: string): Promise<void> {
   const files = await listFiles(root);
   const entries = [];
-  for (const file of files.filter(file => !file.startsWith(".contextsdk/")).sort()) {
+  const policy = resolvePersistencePolicy();
+  for (const file of files.filter(file => !file.startsWith(".contextsdk/") && shouldPersistPath(file, policy)).sort()) {
     const fullPath = join(root, file);
     const info = await stat(fullPath);
     const data = await import("node:fs/promises").then(fs => fs.readFile(fullPath));
@@ -99,6 +106,48 @@ async function writeTreeIndex(root: string): Promise<void> {
     version: 1,
     files: entries,
   }, null, 2) + "\n", { mode: 0o644 });
+}
+
+async function existingArchiveItems(root: string, policy: ContextPersistencePolicy): Promise<string[]> {
+  const candidates = [".contextsdk", "contextsdk.json", ...policy.roots];
+  const items: string[] = [];
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    if (!candidate || seen.has(candidate) || shouldExcludePath(candidate, policy.exclude)) {
+      continue;
+    }
+    seen.add(candidate);
+    try {
+      await stat(join(root, candidate));
+      items.push(candidate);
+    } catch {
+      continue;
+    }
+  }
+  return items.length ? items : ["."];
+}
+
+function shouldPersistPath(path: string, policy: ContextPersistencePolicy): boolean {
+  return policy.roots.some(root => path === root || path.startsWith(`${root}/`))
+    && !shouldExcludePath(path, policy.exclude);
+}
+
+function shouldExcludePath(path: string, patterns: string[]): boolean {
+  return patterns.some(pattern => {
+    const trimmed = pattern.endsWith("/**") ? pattern.slice(0, -3) : pattern;
+    return globLike(path, pattern)
+      || globLike(path, trimmed)
+      || (trimmed ? path.startsWith(`${trimmed.replace(/^\*\*\//, "")}/`) : false);
+  });
+}
+
+function globLike(path: string, pattern: string): boolean {
+  const escaped = pattern
+    .replace(/\*\*/g, "__CONTEXTSDK_GLOBSTAR__")
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*/g, "[^/]*")
+    .replace(/__CONTEXTSDK_GLOBSTAR__/g, ".*");
+  return new RegExp(`^${escaped}$`).test(path);
 }
 
 async function listFiles(root: string, prefix = ""): Promise<string[]> {

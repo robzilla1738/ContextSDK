@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -16,12 +16,20 @@ describe("tree bundles", () => {
       const unpacked = join(dir, "unpacked");
       await prepareContextTree({ root, contextId: "unit-test" });
       await writeFile(join(root, "workspace", "task.txt"), "persist me\n");
+      await mkdir(join(root, "workspace", "node_modules", "pkg"), { recursive: true });
+      await mkdir(join(root, "workspace", ".next"), { recursive: true });
+      await writeFile(join(root, "workspace", "node_modules", "pkg", "index.js"), "do not persist\n");
+      await writeFile(join(root, "workspace", ".next", "build-id"), "do not persist\n");
+      await writeFile(join(root, "cache", "runtime-cache.txt"), "runtime only\n");
 
       await packContextTree({ root, archivePath: archive });
       await unpackContextTree({ archivePath: archive, destination: unpacked });
 
       await expect(readFile(join(unpacked, "workspace", "task.txt"), "utf8")).resolves.toBe("persist me\n");
       await expect(readFile(join(unpacked, "contextsdk.json"), "utf8")).resolves.toContain("unit-test");
+      await expect(readFile(join(unpacked, "workspace", "node_modules", "pkg", "index.js"), "utf8")).rejects.toThrow();
+      await expect(readFile(join(unpacked, "workspace", ".next", "build-id"), "utf8")).rejects.toThrow();
+      await expect(readFile(join(unpacked, "cache", "runtime-cache.txt"), "utf8")).rejects.toThrow();
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

@@ -109,11 +109,11 @@ addRuntimeOptions(program
     const storage = storageFromEnv();
     const encryption = encryptionFromEnv();
     if (options.createIfMissing && !await storage.headObject(contextKeys(id).manifest)) {
-      await createContext({ id, size: options.size, format: options.format, storage, encryption });
+      await createContext({ id, size: options.size, format: options.format, storage, encryption, persistencePolicy: configFromFile().persistence });
     }
     const command = commandParts.length > 0 ? commandParts.map(shellQuote).join(" ") : "";
     const provisioner = provisionerFromOptions(options);
-    const runtime = provisioner ? undefined : await runtimeFromOptions(options);
+    const runtime = provisioner ? undefined : await runtimeFromOptions(options, id);
     const result = await runWithContext({
       id,
       storage,
@@ -122,6 +122,8 @@ addRuntimeOptions(program
       runtime,
       createIfMissing: false,
       message: options.message,
+      persistencePolicy: configFromFile().persistence,
+      runtimeState: runtimeStateMode(options),
       checkpoint: {
         intervalMs: options.checkpointInterval ? parseDurationMs(options.checkpointInterval) : configFromFile().checkpoint?.intervalMs,
       },
@@ -171,9 +173,9 @@ addRuntimeOptions(session
     const storage = storageFromEnv();
     const encryption = encryptionFromEnv();
     if (options.createIfMissing && !await storage.headObject(contextKeys(id).manifest)) {
-      await createContext({ id, size: options.size, format: options.format, storage, encryption });
+      await createContext({ id, size: options.size, format: options.format, storage, encryption, persistencePolicy: configFromFile().persistence });
     }
-    const runtime = await runtimeFromOptions(options);
+    const runtime = await runtimeFromOptions(options, id);
     const started = await startContextSession({
       id,
       storage,
@@ -182,6 +184,7 @@ addRuntimeOptions(session
       mountPath: options.mountPath,
       forceUnlock: options.forceUnlock,
       createIfMissing: false,
+      persistencePolicy: configFromFile().persistence,
     });
     printJson({ ok: true, session: summarizeSession(started) });
   });
@@ -193,13 +196,15 @@ addRuntimeOptions(session
   .option("--author <author>", "version author", "contextsdk")
   .option("--mount-path <path>", "mount path inside the runtime"))
   .action(async (id: string, options: RuntimeCliOptions & { message: string; author: string; mountPath?: string }) => {
-    const runtime = await runtimeFromOptions(options);
+    const runtime = await runtimeFromOptions(options, id);
     const active = mountedFromCli(id, runtime, options);
     const manifest = await saveContextSession(buildSession(runtime, active), {
       storage: storageFromEnv(),
       encryption: encryptionFromEnv(),
       author: options.author,
       message: options.message,
+      persistencePolicy: configFromFile().persistence,
+      runtimeState: runtimeStateMode(options),
     });
     printJson({ ok: true, manifest });
   });
@@ -211,7 +216,7 @@ addRuntimeOptions(session
   .option("--mount-path <path>", "mount path inside the runtime")
   .option("--force-unlock", "release the lock even if the owner differs"))
   .action(async (id: string, options: RuntimeCliOptions & { owner?: string; mountPath?: string; forceUnlock?: boolean }) => {
-    const runtime = await runtimeFromOptions(options);
+    const runtime = await runtimeFromOptions(options, id);
     await detachContext({
       id,
       storage: storageFromEnv(),
@@ -229,12 +234,13 @@ addRuntimeOptions(session
   .option("--reason <reason>", "checkpoint reason", "manual")
   .option("--mount-path <path>", "mount path inside the runtime"))
   .action(async (id: string, options: RuntimeCliOptions & { reason: string; mountPath?: string }) => {
-    const runtime = await runtimeFromOptions(options);
+    const runtime = await runtimeFromOptions(options, id);
     const active = mountedFromCli(id, runtime, options);
     const manifest = await checkpointContextSession(buildSession(runtime, active), {
       storage: storageFromEnv(),
       encryption: encryptionFromEnv(),
       reason: options.reason,
+      persistencePolicy: configFromFile().persistence,
     });
     printJson({ ok: true, manifest });
   });
@@ -247,7 +253,7 @@ addRuntimeOptions(files
   .argument("[path]", "managed path", "workspace")
   .option("--mount-path <path>", "mount path inside the runtime"))
   .action(async (id: string, path: string, options: RuntimeCliOptions & { mountPath?: string }) => {
-    const runtime = await runtimeFromOptions(options);
+    const runtime = await runtimeFromOptions(options, id);
     const active = buildSession(runtime, mountedFromCli(id, runtime, options));
     printJson({ ok: true, files: await active.files.list(path) });
   });
@@ -258,7 +264,7 @@ addRuntimeOptions(files
   .argument("<path>", "managed path")
   .option("--mount-path <path>", "mount path inside the runtime"))
   .action(async (id: string, path: string, options: RuntimeCliOptions & { mountPath?: string }) => {
-    const runtime = await runtimeFromOptions(options);
+    const runtime = await runtimeFromOptions(options, id);
     process.stdout.write(await buildSession(runtime, mountedFromCli(id, runtime, options)).files.read(path));
   });
 
@@ -269,7 +275,7 @@ addRuntimeOptions(files
   .argument("<data>", "text data")
   .option("--mount-path <path>", "mount path inside the runtime"))
   .action(async (id: string, path: string, data: string, options: RuntimeCliOptions & { mountPath?: string }) => {
-    const runtime = await runtimeFromOptions(options);
+    const runtime = await runtimeFromOptions(options, id);
     await buildSession(runtime, mountedFromCli(id, runtime, options)).files.write(path, data);
     printJson({ ok: true });
   });
@@ -280,7 +286,7 @@ addRuntimeOptions(files
   .argument("<path>", "managed path")
   .option("--mount-path <path>", "mount path inside the runtime"))
   .action(async (id: string, path: string, options: RuntimeCliOptions & { mountPath?: string }) => {
-    const runtime = await runtimeFromOptions(options);
+    const runtime = await runtimeFromOptions(options, id);
     await buildSession(runtime, mountedFromCli(id, runtime, options)).files.remove(path);
     printJson({ ok: true });
   });
@@ -315,6 +321,7 @@ program
       format: options.format,
       storage: storageFromEnv(),
       encryption: encryptionFromEnv(),
+      persistencePolicy: configFromFile().persistence,
       force: options.force,
     });
     printJson({ ok: true, manifest });
@@ -326,7 +333,7 @@ addRuntimeOptions(program
   .option("--mount-path <path>", "mount path inside the runtime")
   .option("--force-unlock", "replace an existing active lock"))
   .action(async (id: string, options: RuntimeCliOptions & { mountPath?: string; forceUnlock?: boolean }) => {
-    const runtime = await runtimeFromOptions(options);
+    const runtime = await runtimeFromOptions(options, id);
     const mounted = await attachContext({
       id,
       storage: storageFromEnv(),
@@ -343,13 +350,15 @@ addRuntimeOptions(program
   .argument("<id>", "context id")
   .option("--mount-path <path>", "mount path inside the runtime"))
   .action(async (id: string, options: RuntimeCliOptions & { mountPath?: string }) => {
-    const runtime = await runtimeFromOptions(options);
+    const runtime = await runtimeFromOptions(options, id);
     const manifest = await saveContext({
       id,
       storage: storageFromEnv(),
       encryption: encryptionFromEnv(),
       runtime,
       mountPath: options.mountPath,
+      persistencePolicy: configFromFile().persistence,
+      runtimeState: runtimeStateMode(options),
     });
     printJson({ ok: true, manifest });
   });
@@ -361,7 +370,7 @@ addRuntimeOptions(program
   .option("--owner <owner>", "lock owner emitted by attach")
   .option("--force-unlock", "release the lock even if the owner differs"))
   .action(async (id: string, options: RuntimeCliOptions & { mountPath?: string; owner?: string; forceUnlock?: boolean }) => {
-    const runtime = await runtimeFromOptions(options);
+    const runtime = await runtimeFromOptions(options, id);
     await detachContext({
       id,
       storage: storageFromEnv(),
@@ -461,6 +470,10 @@ interface RuntimeCliOptions {
   vercelRuntime?: string;
   vercelTimeoutMs?: string;
   vercelVcpus?: string;
+  vercelPersistent?: boolean;
+  vercelSnapshotExpiration?: string;
+  vercelKeepLastSnapshots?: string;
+  runtimeState?: string;
   modalSandboxId?: string;
   modalApp?: string;
   modalImage?: string;
@@ -483,6 +496,11 @@ function addRuntimeOptions(command: Command): Command {
     .option("--vercel-runtime <runtime>", "Vercel Sandbox runtime", "python3.13")
     .option("--vercel-timeout-ms <ms>", "Vercel Sandbox timeout in ms")
     .option("--vercel-vcpus <count>", "Vercel Sandbox vCPU count")
+    .option("--vercel-persistent", "enable Vercel persistent named sandbox state")
+    .option("--no-vercel-persistent", "disable Vercel persistent named sandbox state")
+    .option("--vercel-snapshot-expiration <duration>", "Vercel snapshot expiration, for example 14d or 1209600000")
+    .option("--vercel-keep-last-snapshots <count>", "number of Vercel snapshots to retain")
+    .option("--runtime-state <mode>", "runtime state handling: auto or disabled", "auto")
     .option("--modal-sandbox-id <id>", "existing Modal sandbox id")
     .option("--modal-app <name>", "Modal app name")
     .option("--modal-image <image>", "Modal registry image", "python:3.13-slim")
@@ -524,7 +542,7 @@ function encryptionFromEnv(): EncryptionConfig {
   return { passphrase, rawKeyHex };
 }
 
-async function runtimeFromOptions(options: RuntimeCliOptions): Promise<RuntimeAdapter> {
+async function runtimeFromOptions(options: RuntimeCliOptions, contextId?: string): Promise<RuntimeAdapter> {
   const runtime = runtimeName(options);
   if (runtime === "e2b") {
     return E2BAdapter.create({
@@ -536,9 +554,16 @@ async function runtimeFromOptions(options: RuntimeCliOptions): Promise<RuntimeAd
   if (runtime === "vercel") {
     return VercelSandboxAdapter.create({
       sandboxName: options.vercelSandboxName ?? options.sandboxName ?? stringProviderValue("vercel", "sandboxName"),
+      contextId,
       runtime: options.vercelRuntime ?? stringProviderValue("vercel", "runtime"),
       timeoutMs: firstNumber(options.vercelTimeoutMs, options.sandboxTimeoutMs, providerValue("vercel", "timeoutMs")),
       vcpus: firstNumber(options.vercelVcpus, providerValue("vercel", "vcpus")),
+      persistent: vercelPersistentFromOptions(options),
+      snapshotExpirationMs: firstNumber(
+        options.vercelSnapshotExpiration ? parseDurationMs(options.vercelSnapshotExpiration) : undefined,
+        providerValue("vercel", "snapshotExpirationMs"),
+      ),
+      keepLastSnapshots: firstNumber(options.vercelKeepLastSnapshots, providerValue("vercel", "keepLastSnapshots")),
     });
   }
   if (runtime === "modal") {
@@ -579,6 +604,12 @@ function provisionerFromOptions(options: RuntimeCliOptions): RuntimeProvisioner 
       runtime: options.vercelRuntime ?? stringProviderValue("vercel", "runtime"),
       timeoutMs: firstNumber(options.vercelTimeoutMs, options.sandboxTimeoutMs, providerValue("vercel", "timeoutMs")),
       vcpus: firstNumber(options.vercelVcpus, providerValue("vercel", "vcpus")),
+      persistent: vercelPersistentFromOptions(options),
+      snapshotExpirationMs: firstNumber(
+        options.vercelSnapshotExpiration ? parseDurationMs(options.vercelSnapshotExpiration) : undefined,
+        providerValue("vercel", "snapshotExpirationMs"),
+      ),
+      keepLastSnapshots: firstNumber(options.vercelKeepLastSnapshots, providerValue("vercel", "keepLastSnapshots")),
     });
   }
   if (runtime === "modal" && !options.modalSandboxId) {
@@ -597,15 +628,17 @@ async function runSyntheticBlindRetrieval(id: string, options: RuntimeCliOptions
   const storage = storageFromEnv();
   const encryption = encryptionFromEnv();
   if (!await storage.headObject(contextKeys(id).manifest)) {
-    await createContext({ id, storage, encryption, format: "tree" });
+    await createContext({ id, storage, encryption, format: "tree", persistencePolicy: configFromFile().persistence });
   }
   await runWithContext({
     id,
     storage,
     encryption,
     provisioner: provisionerFromOptions(options),
-    runtime: provisionerFromOptions(options) ? undefined : await runtimeFromOptions(options),
+    runtime: provisionerFromOptions(options) ? undefined : await runtimeFromOptions(options, id),
     message: "seed blind retrieval synthetic context",
+    persistencePolicy: configFromFile().persistence,
+    runtimeState: runtimeStateMode(options),
   }, async active => {
     await active.files.write("memory/projects/meridian/decision-log.md", "# Meridian decisions\n\nThe Friday launch blocker is the missing Northwind Data Trust SOC 2 bridge letter.\n");
     await active.files.write("workspace/projects/meridian/launch-checklist.md", "# Launch checklist\n\n- Payments smoke: passed\n- Legal review: passed\n- Required evidence: Northwind Data Trust SOC 2 bridge letter is missing\n");
@@ -617,10 +650,10 @@ async function runCrashRecoveryScenario(id: string, options: RuntimeCliOptions):
   const storage = storageFromEnv();
   const encryption = encryptionFromEnv();
   if (!await storage.headObject(contextKeys(id).manifest)) {
-    await createContext({ id, storage, encryption, format: "tree" });
+    await createContext({ id, storage, encryption, format: "tree", persistencePolicy: configFromFile().persistence });
   }
   const provisioner = provisionerFromOptions(options);
-  const runtime = provisioner ? await provisioner.createSessionRuntime() : await runtimeFromOptions(options);
+  const runtime = provisioner ? await provisioner.createSessionRuntime({ contextId: id }) : await runtimeFromOptions(options, id);
   try {
     const active = await startContextSession({ id, storage, encryption, runtime });
     await active.files.write("workspace/recovery.txt", `checkpointed at ${new Date().toISOString()}\n`);
@@ -672,7 +705,7 @@ function summarizeSession(session: ContextSession): unknown {
 }
 
 function parseDurationMs(value: string): number {
-  const match = value.trim().match(/^(\d+)(ms|s|m|h)?$/);
+  const match = value.trim().match(/^(\d+)(ms|s|m|h|d)?$/);
   if (!match) {
     throw new Error(`invalid duration: ${value}`);
   }
@@ -682,6 +715,7 @@ function parseDurationMs(value: string): number {
   if (unit === "s") return amount * 1000;
   if (unit === "m") return amount * 60_000;
   if (unit === "h") return amount * 3_600_000;
+  if (unit === "d") return amount * 86_400_000;
   return amount;
 }
 
@@ -729,9 +763,34 @@ function runtimeName(options: RuntimeCliOptions): string {
   return runtime;
 }
 
+function runtimeStateMode(options: RuntimeCliOptions): "auto" | "disabled" {
+  const value = options.runtimeState ?? configFromFile().runtimeState ?? "auto";
+  if (value !== "auto" && value !== "disabled") {
+    throw new Error("--runtime-state must be auto or disabled");
+  }
+  return value;
+}
+
+function vercelPersistentFromOptions(options: RuntimeCliOptions): boolean | undefined {
+  if (options.vercelPersistent !== undefined) {
+    return options.vercelPersistent;
+  }
+  const configured = booleanProviderValue("vercel", "persistent");
+  if (configured !== undefined) {
+    return configured;
+  }
+  return runtimeStateMode(options) === "disabled" ? false : undefined;
+}
+
 function stringProviderValue(provider: string, key: string): string | undefined {
   const value = providerValue(provider, key);
   return typeof value === "string" ? value : undefined;
+}
+
+function booleanProviderValue(provider: string, key: string): boolean | undefined {
+  const providers = configFromFile().providers as Record<string, Record<string, unknown> | undefined> | undefined;
+  const value = providers?.[provider]?.[key];
+  return typeof value === "boolean" ? value : undefined;
 }
 
 function providerValue(provider: string, key: string): string | number | undefined {

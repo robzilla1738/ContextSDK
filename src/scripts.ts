@@ -1,4 +1,6 @@
 import { shellQuote } from "./shell.js";
+import { resolvePersistencePolicy } from "./persistence-policy.js";
+import type { ContextPersistencePolicy } from "./types.js";
 
 export function ensureRuntimeToolsScript(): string {
   return [
@@ -32,30 +34,78 @@ export function mountScript(imagePath: string, mountPath: string): string {
   ].join("\n");
 }
 
-export function unpackBundleScript(bundlePath: string, mountPath: string): string {
+export function unpackBundleScript(bundlePath: string, mountPath: string, policy?: Partial<ContextPersistencePolicy>): string {
+  const resolvedPolicy = resolvePersistencePolicy(policy);
   return [
     "set -Eeuo pipefail",
     ensureDirectoryBundleToolsScript(),
     `bundle=${shellQuote(bundlePath)}`,
     `mountpoint=${shellQuote(mountPath)}`,
-    "rm -rf \"$mountpoint\"",
+    `policy=${shellQuote(JSON.stringify(resolvedPolicy))}`,
     "mkdir -p \"$mountpoint\"",
+    "CONTEXTSDK_POLICY=\"$policy\" CONTEXTSDK_MOUNT=\"$mountpoint\" python3 - <<'PY'",
+    "import json, os, pathlib, shutil",
+    "mount = pathlib.Path(os.environ['CONTEXTSDK_MOUNT'])",
+    "policy = json.loads(os.environ['CONTEXTSDK_POLICY'])",
+    "targets = ['.contextsdk', 'contextsdk.json', *policy.get('roots', [])]",
+    "seen = set()",
+    "for target in targets:",
+    "    if not target or target in seen:",
+    "        continue",
+    "    seen.add(target)",
+    "    path = mount / target",
+    "    if path.is_symlink() or path.is_file():",
+    "        path.unlink()",
+    "    elif path.is_dir():",
+    "        shutil.rmtree(path)",
+    "PY",
     "zstd -dc \"$bundle\" | tar -C \"$mountpoint\" -xf -",
     "for root in workspace memory artifacts logs cache config; do mkdir -p \"$mountpoint/$root\"; if [ -L \"/$root\" ] || [ ! -e \"/$root\" ]; then ln -sfn \"$mountpoint/$root\" \"/$root\"; fi; done",
     "printf 'CONTEXTSDK_MOUNT_JSON=%s\\n' \"{\\\"mountPath\\\":\\\"$mountpoint\\\",\\\"remoteBundlePath\\\":\\\"$bundle\\\",\\\"mode\\\":\\\"directoryBundle\\\"}\"",
   ].join("\n");
 }
 
-export function packBundleScript(bundlePath: string, mountPath: string): string {
+export function packBundleScript(bundlePath: string, mountPath: string, policy?: Partial<ContextPersistencePolicy>): string {
+  const resolvedPolicy = resolvePersistencePolicy(policy);
   return [
     "set -Eeuo pipefail",
     ensureDirectoryBundleToolsScript(),
     `bundle=${shellQuote(bundlePath)}`,
     `mountpoint=${shellQuote(mountPath)}`,
+    `policy=${shellQuote(JSON.stringify(resolvedPolicy))}`,
     "test -d \"$mountpoint\"",
     "rm -f \"$bundle\"",
     "sync \"$mountpoint\" 2>/dev/null || sync",
-    "tar -C \"$mountpoint\" -cf - . | zstd -T0 -q -o \"$bundle\"",
+    "tmp_tar=\"$(mktemp)\"",
+    "trap 'rm -f \"$tmp_tar\"' EXIT",
+    "CONTEXTSDK_POLICY=\"$policy\" CONTEXTSDK_MOUNT=\"$mountpoint\" CONTEXTSDK_TAR=\"$tmp_tar\" python3 - <<'PY'",
+    "import fnmatch, json, os, pathlib, tarfile",
+    "mount = pathlib.Path(os.environ['CONTEXTSDK_MOUNT'])",
+    "tar_path = pathlib.Path(os.environ['CONTEXTSDK_TAR'])",
+    "policy = json.loads(os.environ['CONTEXTSDK_POLICY'])",
+    "roots = ['.contextsdk', 'contextsdk.json', *policy.get('roots', [])]",
+    "patterns = policy.get('exclude', [])",
+    "def excluded(rel):",
+    "    rel = rel.replace('\\\\', '/')",
+    "    for pattern in patterns:",
+    "        trimmed = pattern[:-3] if pattern.endswith('/**') else pattern",
+    "        if fnmatch.fnmatch(rel, pattern) or fnmatch.fnmatch(rel, trimmed) or (trimmed and rel.startswith(trimmed.rstrip('/') + '/')):",
+    "            return True",
+    "    return False",
+    "def tar_filter(info):",
+    "    rel = info.name.replace('\\\\', '/')",
+    "    return None if excluded(rel) else info",
+    "with tarfile.open(tar_path, 'w') as archive:",
+    "    seen = set()",
+    "    for root in roots:",
+    "        if not root or root in seen:",
+    "            continue",
+    "        seen.add(root)",
+    "        path = mount / root",
+    "        if path.exists() and not excluded(root):",
+    "            archive.add(path, arcname=root, filter=tar_filter)",
+    "PY",
+    "zstd -T0 -q -f \"$tmp_tar\" -o \"$bundle\"",
     "test -s \"$bundle\"",
   ].join("\n");
 }

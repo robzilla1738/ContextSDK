@@ -1,8 +1,8 @@
 # contextSDK
 
-contextSDK gives agents a real filesystem that survives disposable sandboxes.
+contextSDK gives agents a real filesystem that survives disposable sandboxes and VMs.
 
-Most agent runtimes are intentionally temporary. That is good for safety, but awkward for work that needs continuity. contextSDK keeps the VM or sandbox throwaway and stores the agent's working state separately as an encrypted portable bundle.
+Agent runtimes should usually be temporary. That is safer, but it makes continuity hard. contextSDK keeps the compute disposable and stores the agent's working state separately as an encrypted portable bundle.
 
 The default storage object is:
 
@@ -19,6 +19,17 @@ E2B and SSH-style runtimes can also keep a raw ext4 image for loop mounting:
 - `contexts/<contextId>/current.img.enc`
 
 Inside the runtime, the agent gets the same folders every time: `/workspace`, `/memory`, `/artifacts`, `/logs`, `/cache`, and `/config`.
+
+## Two-layer state
+
+contextSDK splits state into two layers:
+
+- Portable context: encrypted user and agent state that can move across E2B, Vercel, Modal, and SSH.
+- Runtime state: provider-specific machine state such as installed packages, `node_modules`, virtualenvs, language caches, and build output.
+
+The portable bundle defaults to `/workspace`, `/memory`, `/artifacts`, `/logs`, and `/config`. It leaves out `/cache`, `node_modules`, package stores, virtualenvs, `.next`, `dist`, and `build` output. Those paths are expensive to push through object storage and are better handled by provider persistence or snapshots.
+
+Vercel is the first runtime-state implementation. By default, contextSDK uses a persistent named Vercel Sandbox named `contextsdk-<contextId>`. The encrypted context still comes from cloud storage at session start and is saved back at the end. Dependencies stay warm in the sandbox. User and agent context stays portable.
 
 ## Packages
 
@@ -43,7 +54,7 @@ npx contextsdk --help
 
 ## Configure
 
-For a quick trial, environment variables are enough:
+For a quick trial, use environment variables:
 
 ```bash
 export CONTEXTSDK_S3_BUCKET="agent-contexts"
@@ -78,17 +89,21 @@ export default {
   },
   defaultRuntime: "e2b",
   defaultFormat: "tree",
+  runtimeState: "auto",
+  persistence: {
+    roots: ["workspace", "memory", "artifacts", "logs", "config"],
+  },
   checkpoint: {
     intervalMs: 300000,
   },
   providers: {
-    vercel: { runtime: "python3.13" },
+    vercel: { runtime: "python3.13", persistent: true, snapshotExpirationMs: 1209600000, keepLastSnapshots: 3 },
     modal: { appName: "contextsdk", imageTag: "python:3.13-slim", volumeName: "contextsdk-contexts" },
   },
 } satisfies ContextSDKConfig;
 ```
 
-Provider credentials stay in the environment. The CLI reads `E2B_API_KEY`, Vercel auth, Modal auth, and S3 credentials, but it does not print secret values in `doctor` output.
+Provider credentials stay in the environment. The CLI reads `E2B_API_KEY`, Vercel auth, Modal auth, and S3 credentials, but `doctor` does not print secret values.
 
 ## CLI examples
 
@@ -116,6 +131,15 @@ Run the same context in Vercel Sandbox:
 ```bash
 npx contextsdk run employee-robert --runtime vercel --create-if-missing -- sh -lc 'echo vercel >> /memory/session.md'
 ```
+
+Use Vercel runtime state for dependency-heavy work:
+
+```bash
+npx contextsdk run employee-robert --runtime vercel --create-if-missing -- sh -lc 'npm install && echo ok > /workspace/result.txt'
+npx contextsdk run employee-robert --runtime vercel -- sh -lc 'test -d node_modules && cat /workspace/result.txt'
+```
+
+The second run resumes the same named sandbox by default. `node_modules` stays in Vercel provider state. `/workspace/result.txt` is saved in the encrypted portable context bundle. To force an ephemeral Vercel sandbox, pass `--runtime-state disabled --no-vercel-persistent`.
 
 Run it in Modal:
 
@@ -182,7 +206,7 @@ await runWithContext({
 });
 ```
 
-`runWithContext` starts a checkpoint timer when configured. It also tries to save and clean up on `SIGINT` and `SIGTERM`. A hard kill can still lose work after the last checkpoint; that is the honest limit.
+`runWithContext` starts a checkpoint timer when configured. It also tries to save and clean up on `SIGINT` and `SIGTERM`. A hard kill can still lose work after the last checkpoint.
 
 ## How each runtime works
 
@@ -192,14 +216,16 @@ E2B:
 - Uploads the image to the sandbox.
 - Mounts it with loop devices.
 - Checkpoints the mounted tree without unmounting.
-- On final save, validates ext4 and stores both the tree bundle and ext4 image.
+- On final save, stores the filtered tree bundle. Explicit ext4 contexts can also update the encrypted ext4 image.
 
 Vercel Sandbox:
 
 - Unpacks the tree bundle into `/vercel/sandbox/contextsdk/<id>`.
 - Exposes `/workspace`, `/memory`, `/artifacts`, `/logs`, `/cache`, and `/config`.
 - Saves by creating a tar+zstd bundle in the sandbox, downloading it, encrypting it locally, and uploading it to storage.
-- Provider snapshots can be useful for warm starts, but the encrypted tree bundle remains the portable state.
+- Uses persistent named sandboxes by default, so installed packages, package caches, and build outputs can survive without entering the portable bundle.
+- Stores runtime-state metadata in `manifest.json`, including the sandbox name and snapshot IDs when Vercel exposes them.
+- Provider persistence and snapshots are accelerators; the encrypted tree bundle remains the portable state.
 
 Modal:
 
@@ -210,9 +236,9 @@ Modal:
 
 ## Enterprise shape
 
-The enterprise version is straightforward: put a Context Broker in front of the SDK. The broker decides who can attach which context, enforces one active writer, records audit events, runs DLP or artifact scanning before save, and handles retention or legal hold.
+The enterprise version puts a Context Broker in front of the SDK. The broker decides who can attach which context, enforces one active writer, records audit events, runs DLP or artifact scanning before save, and handles retention or legal hold.
 
-The employee still gets a normal agent experience. The platform gets policy, locks, versions, and a storage layout it can inspect.
+Employees still get a normal agent experience. The platform gets policy, locks, versions, and a storage layout it can inspect.
 
 ## Original ext4 validation
 

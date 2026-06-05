@@ -13,6 +13,21 @@ export default {
   },
   defaultRuntime: "e2b",
   defaultFormat: "tree",
+  runtimeState: "auto",
+  persistence: {
+    roots: ["workspace", "memory", "artifacts", "logs", "config"],
+    exclude: [
+      "**/node_modules/**",
+      "**/.pnpm-store/**",
+      "**/.npm/**",
+      "**/.yarn/cache/**",
+      "**/.next/**",
+      "**/dist/**",
+      "**/build/**",
+      "**/.venv/**",
+      "**/__pycache__/**",
+    ],
+  },
   checkpoint: {
     intervalMs: 300000,
     enabled: true,
@@ -25,6 +40,9 @@ export default {
       runtime: "python3.13",
       timeoutMs: 600000,
       vcpus: 2,
+      persistent: true,
+      snapshotExpirationMs: 14 * 24 * 60 * 60 * 1000,
+      keepLastSnapshots: 3,
     },
     modal: {
       appName: "contextsdk",

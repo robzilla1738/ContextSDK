@@ -1,17 +1,19 @@
 # Vercel Agent Workspace
 
-Goal: unpack the encrypted tree bundle directly into a Vercel Sandbox directory, write state, save, then read it from a second sandbox.
+Goal: unpack the encrypted context into a Vercel Sandbox, write portable context files, and keep dependency-heavy runtime state in Vercel's persistent named sandbox.
 
 ```bash
 npx contextsdk run vercel-demo \
   --runtime vercel \
   --create-if-missing \
   --checkpoint-interval 5m \
-  -- sh -lc 'echo "vercel state" > /workspace/result.txt && echo "remember vercel" >> /memory/session.md'
+  -- sh -lc 'npm init -y >/dev/null && npm install is-odd >/dev/null && echo "vercel state" > /workspace/result.txt && echo "remember vercel" >> /memory/session.md'
 
 npx contextsdk run vercel-demo \
   --runtime vercel \
-  -- sh -lc 'cat /workspace/result.txt && tail -n 1 /memory/session.md'
+  -- sh -lc 'test -d node_modules && cat /workspace/result.txt && tail -n 1 /memory/session.md'
 ```
 
-Expected result: the second run reads the file written by the first run.
+Expected result: the second run resumes the same named Vercel sandbox, sees `node_modules` from provider state, and reads `/workspace/result.txt` plus `/memory/session.md` from the encrypted portable context.
+
+Use `--runtime-state disabled --no-vercel-persistent` when you want an ephemeral Vercel sandbox for a test.

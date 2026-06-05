@@ -1,10 +1,12 @@
 # Enterprise rollout
 
-The basic idea is simple: keep the sandbox disposable, but stop throwing away the employee's working state.
+The basic idea is simple: keep the sandbox disposable, but stop throwing away the employee's work.
 
 contextSDK gives each agent run a mounted context with `/workspace`, `/memory`, `/artifacts`, `/logs`, `/cache`, and `/config`. When the run ends, the SDK checkpoints the tree, encrypts it, saves it to object storage, releases the lock, and tears down the runtime.
 
 That gives an enterprise agent platform a persistence layer without making the sandbox itself permanent.
+
+The important split is portable context versus runtime state. Portable context is the encrypted bundle that moves between providers. Runtime state is the provider-local machine state: installed packages, language caches, `node_modules`, virtualenvs, and build outputs. Vercel persistent named sandboxes are the first runtime-state implementation; other provider snapshots can plug into the same model later.
 
 ## Useful places to start
 
@@ -14,6 +16,7 @@ That gives an enterprise agent platform a persistence layer without making the s
 - Regulated workflows where you need to know which agent changed what and when.
 - Recovery after a sandbox dies.
 - Cross-runtime portability across E2B, Vercel Sandbox, Modal, SSH VMs, and internal VM sandboxes.
+- Warm dependency state for Vercel sessions without pushing dependency trees into object storage.
 
 ## Reference architecture
 
@@ -24,10 +27,12 @@ That gives an enterprise agent platform a persistence layer without making the s
 2. Encrypted storage
    - Uses S3-compatible object storage.
    - Stores `current.tree.tar.zst.enc`, optional `current.img.enc`, `manifest.json`, `lock.json`, checkpoint bundles, and audit records.
+   - Stores user and agent context, not dependency caches or full machine state.
 
 3. Runtime provisioners
    - E2B, Vercel Sandbox, and Modal are the first adapters.
    - Internal Firecracker, EC2, Kubernetes VM sandboxes, and SSH VMs can use the same runtime interface.
+   - Provider persistence or snapshots keep heavy runtime state warm when the provider supports it.
 
 4. Policy engine
    - Maps employee identity, department, role, project, data class, runtime, and tool permissions to allowed actions.
@@ -43,7 +48,7 @@ That gives an enterprise agent platform a persistence layer without making the s
 
 Phase 1: run an internal pilot.
 
-Use one agent product, one runtime provider, and one storage bucket. Start with personal employee contexts. Require encryption, one active writer, audit events, quotas, and short-lived provider credentials.
+Use one agent product, one runtime provider, and one storage bucket. Start with personal employee contexts. Require encryption, one active writer, audit events, quotas, and short-lived provider credentials. If the pilot uses Vercel, enable persistent named sandboxes so package installs stay provider-local.
 
 Phase 2: add shared contexts.
 
@@ -55,7 +60,7 @@ Run DLP before save. Scan artifacts. Add retention, legal hold, KMS-backed keys,
 
 Phase 4: add more runtimes.
 
-Keep the storage contract stable while adding internal VM providers. The runtime should be replaceable compute, not the persistence layer.
+Keep the storage contract stable while adding internal VM providers. Runtime snapshots are useful, but they should remain accelerators. The encrypted context bundle is the portable record.
 
 ## Security model
 
@@ -70,6 +75,7 @@ Minimum controls:
 - Record audit events.
 - Scan before save when policy requires it.
 - Avoid text APIs for raw image or bundle transfer.
+- Keep dependency caches out of the portable bundle unless policy explicitly opts them in.
 - Apply retention, legal hold, and deletion policies.
 
 Useful references:
@@ -85,4 +91,4 @@ This is not chatbot memory. It is operating context for AI work: files, notes, a
 
 The pitch I would use internally:
 
-Keep the sandbox temporary. Keep the work.
+Keep the sandbox temporary. Keep the work. Let provider snapshots handle the machine.

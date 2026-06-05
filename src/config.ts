@@ -1,4 +1,4 @@
-import type { ContextFormat, RuntimeProvider } from "./types.js";
+import type { ContextFormat, ContextPersistencePolicy, RuntimeProvider } from "./types.js";
 
 export interface ContextSDKConfig {
   storage?: {
@@ -19,6 +19,8 @@ export interface ContextSDKConfig {
     intervalMs?: number;
     enabled?: boolean;
   };
+  persistence?: Partial<ContextPersistencePolicy>;
+  runtimeState?: "auto" | "disabled";
   providers?: {
     e2b?: Record<string, unknown>;
     vercel?: Record<string, unknown>;

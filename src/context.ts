@@ -7,6 +7,7 @@ import { createArtifactsApi, createLogsApi, createMemoryApi, MountedContextFileM
 import { createExt4Image, parseSize, validateExt4Image } from "./local-image.js";
 import { acquireLock, makeOwner, readLock, releaseLock } from "./lock.js";
 import { contextKeys, defaultLayout, defaultMountPath, remoteBundlePath, remoteImagePath } from "./paths.js";
+import { resolvePersistencePolicy } from "./persistence-policy.js";
 import { assertSuccess } from "./runtime.js";
 import { detachDirectoryScript, detachScript, ensureRuntimeToolsScript, mountScript, packBundleScript, saveScript, unpackBundleScript } from "./scripts.js";
 import { shellQuote } from "./shell.js";
@@ -22,6 +23,7 @@ import type {
   CreateContextOptions,
   DetachContextOptions,
   MountedContext,
+  RuntimeStateMetadata,
   RunWithContextOptions,
   SaveContextOptions,
   StartContextSessionOptions,
@@ -41,8 +43,9 @@ export async function createContext(options: CreateContextOptions): Promise<Cont
     const encryptedPath = join(tempDir, "context.ext4.img.enc");
     const encryptedTreePath = join(tempDir, "context.tree.tar.zst.enc");
     const sizeBytes = options.size ? await parseSize(options.size) : 0;
+    const persistencePolicy = resolvePersistencePolicy(options.persistencePolicy);
     await prepareContextTree({ root: treeRoot, contextId: options.id });
-    await packContextTree({ root: treeRoot, archivePath: treePath });
+    await packContextTree({ root: treeRoot, archivePath: treePath, policy: persistencePolicy });
     const treeEncryption = await encryptFile(treePath, encryptedTreePath, options.encryption);
     const imageEncryption = format === "ext4"
       ? await createAndEncryptExt4({ rawPath, encryptedPath, stagingDir: treeRoot, sizeBytes: sizeBytes || 256 * 1024 * 1024, contextId: options.id, encryption: options.encryption })
@@ -63,6 +66,7 @@ export async function createContext(options: CreateContextOptions): Promise<Cont
       imageEncryption: format === "ext4" ? imageEncryption : undefined,
       layout: [...defaultLayout],
       versions: [],
+      persistencePolicy,
       createdAt: now,
       updatedAt: now,
     };
@@ -105,7 +109,7 @@ export async function attachContext(options: AttachContextOptions): Promise<Moun
       await decryptFile(treeEncryptedPath, treePath, manifest.treeEncryption ?? manifest.encryption, options.encryption);
       if (useDirectoryBundle) {
         await options.runtime.uploadFile(treePath, remoteTreePath);
-        const mountResult = await options.runtime.run(unpackBundleScript(remoteTreePath, mountPath), { user: "root" });
+        const mountResult = await options.runtime.run(unpackBundleScript(remoteTreePath, mountPath, manifest.persistencePolicy), { user: "root" });
         assertSuccess(mountResult, "mount context bundle");
         return {
           id: options.id,
@@ -156,6 +160,7 @@ export async function saveContext(options: SaveContextOptions): Promise<ContextM
   const remoteTreePath = remoteBundlePath(options.id);
   const tempDir = await mkdtemp(join(tmpdir(), "contextsdk-save-"));
   try {
+    const persistencePolicy = resolvePersistencePolicy(options.persistencePolicy ?? manifest.persistencePolicy);
     const nextGeneration = manifest.generation + 1;
     const version = await snapshotContextVersion({
       runtime: options.runtime,
@@ -164,9 +169,10 @@ export async function saveContext(options: SaveContextOptions): Promise<ContextM
       parentGeneration: manifest.generation,
       author: options.author ?? options.owner ?? "contextsdk",
       message: options.message ?? "save context",
+      policy: persistencePolicy,
     });
     await options.runtime.flush?.(mountPath);
-    assertSuccess(await options.runtime.run(packBundleScript(remoteTreePath, mountPath), { user: "root" }), "pack context tree");
+    assertSuccess(await options.runtime.run(packBundleScript(remoteTreePath, mountPath, persistencePolicy), { user: "root" }), "pack context tree");
     const treePath = join(tempDir, "current.tree.tar.zst");
     const encryptedTreePath = join(tempDir, "current.tree.tar.zst.enc");
     await options.runtime.downloadFile(remoteTreePath, treePath);
@@ -176,12 +182,15 @@ export async function saveContext(options: SaveContextOptions): Promise<ContextM
     let imageEncryption = manifest.imageEncryption;
     let sizeBytes = (await stat(treePath)).size;
     const isDirectoryBundle = Boolean(options.runtime.capabilities?.directoryBundle) && !options.runtime.capabilities?.loopExt4;
+    const shouldPersistExt4Image = !isDirectoryBundle && (manifest.format === "ext4" || Boolean(manifest.imageEncryption));
     if (!isDirectoryBundle) {
       assertSuccess(await options.runtime.run(saveScript(remotePath, mountPath), { user: "root" }), "save context");
-      await options.runtime.downloadFile(remotePath, rawPath);
-      await validateExt4Image(rawPath);
-      imageEncryption = await encryptFile(rawPath, encryptedPath, options.encryption);
-      sizeBytes = (await stat(rawPath)).size;
+      if (shouldPersistExt4Image) {
+        await options.runtime.downloadFile(remotePath, rawPath);
+        await validateExt4Image(rawPath);
+        imageEncryption = await encryptFile(rawPath, encryptedPath, options.encryption);
+        sizeBytes = (await stat(rawPath)).size;
+      }
     }
     const updated: ContextManifest = {
       ...manifest,
@@ -193,11 +202,13 @@ export async function saveContext(options: SaveContextOptions): Promise<ContextM
       imageEncryption,
       latestVersion: version,
       versions: [...(manifest.versions ?? []), version],
+      persistencePolicy,
+      runtimeState: await runtimeStateForManifest(options.runtime, options.runtimeState, manifest.runtimeState),
       updatedAt: new Date().toISOString(),
       sizeBytes,
     };
     await options.storage.putObject(manifest.treeKey, await readFile(encryptedTreePath));
-    if (!isDirectoryBundle && imageEncryption) {
+    if (shouldPersistExt4Image && imageEncryption) {
       await options.storage.putObject(manifest.imageKey, await readFile(encryptedPath));
     }
     await options.storage.putObject(contextKeys(options.id).manifest, JSON.stringify(updated, null, 2));
@@ -251,7 +262,7 @@ export async function provisionContextRuntime(options: RunWithContextOptions): P
   if (!options.provisioner) {
     throw new ContextSDKError("runtime or provisioner is required");
   }
-  return { runtime: await options.provisioner.createSessionRuntime() };
+  return { runtime: await options.provisioner.createSessionRuntime({ contextId: options.id }) };
 }
 
 export async function startContextSession(options: StartContextSessionOptions): Promise<ContextSession> {
@@ -261,6 +272,7 @@ export async function startContextSession(options: StartContextSessionOptions): 
       size: options.size ?? "256M",
       storage: options.storage,
       encryption: options.encryption,
+      persistencePolicy: options.persistencePolicy,
     });
   }
   const mounted = await attachContext(options);
@@ -288,12 +300,13 @@ export async function checkpointContextSession(
   },
 ): Promise<ContextManifest> {
   const manifest = await readManifest(options.storage, session.id);
+  const persistencePolicy = resolvePersistencePolicy(options.persistencePolicy ?? manifest.persistencePolicy);
   const keys = contextKeys(session.id);
   const tempDir = await mkdtemp(join(tmpdir(), "contextsdk-checkpoint-"));
   const remoteTreePath = remoteBundlePath(session.id);
   try {
     await session.runtime.flush?.(session.mountPath);
-    assertSuccess(await session.runtime.run(packBundleScript(remoteTreePath, session.mountPath), { user: "root" }), "checkpoint context tree");
+    assertSuccess(await session.runtime.run(packBundleScript(remoteTreePath, session.mountPath, persistencePolicy), { user: "root" }), "checkpoint context tree");
     const treePath = join(tempDir, "checkpoint.tree.tar.zst");
     const encryptedTreePath = join(tempDir, "checkpoint.tree.tar.zst.enc");
     await session.runtime.downloadFile(remoteTreePath, treePath);
@@ -316,6 +329,8 @@ export async function checkpointContextSession(
       latestCheckpoint: checkpoint,
       encryption: treeEncryption,
       treeEncryption,
+      persistencePolicy,
+      runtimeState: await runtimeStateForManifest(session.runtime, "auto", manifest.runtimeState),
       updatedAt: checkpoint.timestamp,
       sizeBytes: checkpoint.sizeBytes,
     };
@@ -358,13 +373,20 @@ export async function runWithContext<T>(
       encryption: options.encryption,
       author: options.author,
       message: options.message ?? `runWithContext ${signal} save`,
+      persistencePolicy: options.persistencePolicy,
+      runtimeState: options.runtimeState,
     }).catch(() => undefined);
     await endContextSession(session, {
       storage: options.storage,
     }).catch(() => undefined);
+    const finalizedRuntimeState = options.runtimeState === "disabled"
+      ? undefined
+      : await runtime.finalizeRuntimeState?.().catch(() => undefined);
+    if (finalizedRuntimeState) {
+      await updateManifestRuntimeState(options.storage, options.id, finalizedRuntimeState).catch(() => undefined);
+    }
     if (createdRuntime) {
       await options.provisioner?.destroyRuntime?.(runtime).catch(() => undefined);
-      await runtime.dispose?.().catch(() => undefined);
     }
   });
   try {
@@ -374,6 +396,8 @@ export async function runWithContext<T>(
       encryption: options.encryption,
       author: options.author,
       message: options.message ?? "runWithContext save",
+      persistencePolicy: options.persistencePolicy,
+      runtimeState: options.runtimeState,
     });
     shouldSave = false;
     return result;
@@ -385,6 +409,8 @@ export async function runWithContext<T>(
         encryption: options.encryption,
         author: options.author,
         message: options.message ?? "runWithContext failure save",
+        persistencePolicy: options.persistencePolicy,
+        runtimeState: options.runtimeState,
       }).catch(() => undefined);
       shouldSave = false;
     }
@@ -398,14 +424,22 @@ export async function runWithContext<T>(
         encryption: options.encryption,
         author: options.author,
         message: options.message ?? "runWithContext final save",
+        persistencePolicy: options.persistencePolicy,
+        runtimeState: options.runtimeState,
       }).catch(() => undefined);
     }
     await endContextSession(session, {
       storage: options.storage,
     }).catch(() => undefined);
+    const finalizedRuntimeState = options.runtimeState === "disabled"
+      ? undefined
+      : await runtime.finalizeRuntimeState?.().catch(() => undefined);
     if (createdRuntime) {
       await options.provisioner?.destroyRuntime?.(runtime).catch(() => undefined);
-      await runtime.dispose?.().catch(() => undefined);
+    }
+    const runtimeState = finalizedRuntimeState ?? (options.runtimeState === "disabled" ? undefined : await runtime.getRuntimeState?.().catch(() => undefined));
+    if (runtimeState) {
+      await updateManifestRuntimeState(options.storage, options.id, runtimeState).catch(() => undefined);
     }
   }
 }
@@ -433,6 +467,7 @@ export async function snapshotContextVersion(options: {
   parentGeneration: number | null;
   author: string;
   message: string;
+  policy?: Parameters<typeof snapshotScript>[0]["policy"];
 }): Promise<ContextVersionRecord> {
   const result = await options.runtime.run(snapshotScript(options), { user: "root" });
   assertSuccess(result, "snapshot context version");
@@ -476,6 +511,7 @@ function normalizeManifest(input: ContextManifest, id: string): ContextManifest 
     treeKey: input.treeKey ?? keys.tree,
     treeEncryption: input.treeEncryption ?? (input.format === "tree" ? input.encryption : undefined),
     imageEncryption: input.imageEncryption ?? (input.format !== "tree" ? input.encryption : undefined),
+    persistencePolicy: resolvePersistencePolicy(input.persistencePolicy),
   };
 }
 
@@ -494,6 +530,7 @@ function startCheckpointTimer(session: ContextSession, options: RunWithContextOp
       storage: options.storage,
       encryption: options.encryption,
       reason: "periodic",
+      persistencePolicy: options.persistencePolicy,
     }).catch(() => undefined).finally(() => {
       running = false;
     });
@@ -503,6 +540,30 @@ function startCheckpointTimer(session: ContextSession, options: RunWithContextOp
       clearInterval(timer);
     },
   };
+}
+
+async function runtimeStateForManifest(
+  runtime: RuntimeAdapter,
+  mode: SaveContextOptions["runtimeState"],
+  fallback: RuntimeStateMetadata | undefined,
+): Promise<RuntimeStateMetadata | undefined> {
+  if (mode === "disabled") {
+    return undefined;
+  }
+  return await runtime.getRuntimeState?.().catch(() => undefined) ?? fallback;
+}
+
+async function updateManifestRuntimeState(
+  storage: SaveContextOptions["storage"],
+  id: string,
+  runtimeState: RuntimeStateMetadata,
+): Promise<void> {
+  const manifest = await readManifest(storage, id);
+  await storage.putObject(contextKeys(id).manifest, JSON.stringify({
+    ...manifest,
+    runtimeState,
+    updatedAt: new Date().toISOString(),
+  }, null, 2));
 }
 
 function installSignalFinalizer(onSignal: (signal: NodeJS.Signals) => Promise<void>): { dispose(): void } {

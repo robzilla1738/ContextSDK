@@ -8,6 +8,7 @@ export * from "./local-image.js";
 export * from "./lock.js";
 export * from "./path-policy.js";
 export * from "./paths.js";
+export * from "./persistence-policy.js";
 export * from "./probe.js";
 export * from "./runtime.js";
 export * from "./s3-storage.js";

@@ -1,6 +1,6 @@
 # Cross-Provider E2B to Vercel
 
-Goal: prove the same context can move between providers.
+Goal: prove that the same encrypted context can move between providers.
 
 ```bash
 npx contextsdk run cross-provider-demo \
@@ -13,4 +13,4 @@ npx contextsdk run cross-provider-demo \
   -- sh -lc 'cat /workspace/provider-hop.txt && echo "read in vercel" >> /memory/session.md'
 ```
 
-Expected result: Vercel reads state written by E2B because both providers use `current.tree.tar.zst.enc`.
+Expected result: Vercel reads state written by E2B because both providers use `current.tree.tar.zst.enc` as the portable source of truth.

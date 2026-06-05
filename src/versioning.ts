@@ -1,5 +1,6 @@
 import { shellQuote } from "./shell.js";
-import type { ContextFileEntry, ContextVersionChange } from "./types.js";
+import { resolvePersistencePolicy } from "./persistence-policy.js";
+import type { ContextFileEntry, ContextPersistencePolicy, ContextVersionChange } from "./types.js";
 
 export function diffVersionFiles(previousFiles: ContextFileEntry[], currentFiles: ContextFileEntry[]): ContextVersionChange[] {
   const old = new Map(previousFiles.map(file => [file.path, file]));
@@ -28,7 +29,9 @@ export function snapshotScript(options: {
   parentGeneration: number | null;
   author: string;
   message: string;
+  policy?: Partial<ContextPersistencePolicy>;
 }): string {
+  const policy = resolvePersistencePolicy(options.policy);
   return [
     "set -Eeuo pipefail",
     `export CONTEXTSDK_MOUNT=${shellQuote(options.mountPath)}`,
@@ -36,13 +39,23 @@ export function snapshotScript(options: {
     `export CONTEXTSDK_PARENT=${shellQuote(options.parentGeneration === null ? "" : String(options.parentGeneration))}`,
     `export CONTEXTSDK_AUTHOR=${shellQuote(options.author)}`,
     `export CONTEXTSDK_MESSAGE=${shellQuote(options.message)}`,
+    `export CONTEXTSDK_POLICY=${shellQuote(JSON.stringify(policy))}`,
     "python3 - <<'PY'",
-    "import hashlib, json, os, pathlib, stat, time",
+    "import fnmatch, hashlib, json, os, pathlib, stat, time",
     "mount = pathlib.Path(os.environ['CONTEXTSDK_MOUNT'])",
     "meta = mount / '.contextsdk'",
     "versions = meta / 'versions'",
     "versions.mkdir(parents=True, exist_ok=True)",
-    "roots = ['workspace', 'memory', 'artifacts', 'logs', 'cache', 'config']",
+    "policy = json.loads(os.environ['CONTEXTSDK_POLICY'])",
+    "roots = policy.get('roots', [])",
+    "patterns = policy.get('exclude', [])",
+    "def excluded(rel):",
+    "    rel = rel.replace('\\\\', '/')",
+    "    for pattern in patterns:",
+    "        trimmed = pattern[:-3] if pattern.endswith('/**') else pattern",
+    "        if fnmatch.fnmatch(rel, pattern) or fnmatch.fnmatch(rel, trimmed) or (trimmed and rel.startswith(trimmed.rstrip('/') + '/')):",
+    "            return True",
+    "    return False",
     "files = []",
     "for root_name in roots:",
     "    root = mount / root_name",
@@ -52,6 +65,8 @@ export function snapshotScript(options: {
     "        if not path.is_file():",
     "            continue",
     "        rel = path.relative_to(mount).as_posix()",
+    "        if excluded(rel):",
+    "            continue",
     "        data = path.read_bytes()",
     "        st = path.stat()",
     "        files.append({'path': rel, 'size': st.st_size, 'mode': oct(stat.S_IMODE(st.st_mode)), 'mtime': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(st.st_mtime)), 'sha256': hashlib.sha256(data).hexdigest()})",

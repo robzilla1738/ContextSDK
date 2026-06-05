@@ -1,4 +1,4 @@
-import type { RuntimeCapabilities, RuntimeProvider } from "./types.js";
+import type { RuntimeCapabilities, RuntimeProvider, RuntimeStateMetadata } from "./types.js";
 
 export interface RuntimeCommandResult {
   exitCode: number;
@@ -20,6 +20,8 @@ export interface RuntimeAdapter {
   uploadFile(localPath: string, remotePath: string): Promise<void>;
   downloadFile(remotePath: string, localPath: string): Promise<void>;
   flush?(mountPath: string): Promise<void>;
+  getRuntimeState?(): Promise<RuntimeStateMetadata | undefined>;
+  finalizeRuntimeState?(): Promise<RuntimeStateMetadata | undefined>;
   dispose?(): Promise<void>;
 }
 

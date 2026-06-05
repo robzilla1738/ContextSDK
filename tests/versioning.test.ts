@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { diffVersionFiles } from "../src/versioning.js";
+import { snapshotScript, diffVersionFiles } from "../src/versioning.js";
 import type { ContextFileEntry } from "../src/types.js";
 
 function file(path: string, sha256: string): ContextFileEntry {
@@ -16,5 +16,20 @@ describe("version diffing", () => {
       { path: "workspace/a.txt", type: "modified" },
       { path: "memory/old.md", type: "removed" },
     ]);
+  });
+
+  it("snapshots only persisted roots and excludes dependency-heavy paths", () => {
+    const script = snapshotScript({
+      mountPath: "/mnt/contextsdk/demo",
+      generation: 2,
+      parentGeneration: 1,
+      author: "agent",
+      message: "save",
+    });
+
+    expect(script).toContain('"roots":["workspace","memory","artifacts","logs","config"]');
+    expect(script).toContain("**/node_modules/**");
+    expect(script).toContain("**/.next/**");
+    expect(script).not.toContain('"cache"');
   });
 });

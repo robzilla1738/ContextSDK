@@ -36,6 +36,8 @@ export interface ContextManifest {
   layout: string[];
   latestVersion?: ContextVersionRecord;
   versions?: ContextVersionRecord[];
+  persistencePolicy?: ContextPersistencePolicy;
+  runtimeState?: RuntimeStateMetadata;
   createdAt: string;
   updatedAt: string;
 }
@@ -64,6 +66,7 @@ export interface CreateContextOptions {
   storage: StorageAdapter;
   encryption: EncryptionConfig;
   format?: ContextFormat;
+  persistencePolicy?: Partial<ContextPersistencePolicy>;
   force?: boolean;
 }
 
@@ -88,6 +91,8 @@ export interface SaveContextOptions {
   cleanupRemote?: boolean;
   author?: string;
   message?: string;
+  persistencePolicy?: Partial<ContextPersistencePolicy>;
+  runtimeState?: "auto" | "disabled";
 }
 
 export interface DetachContextOptions {
@@ -136,6 +141,22 @@ export interface ContextVersionRecord {
   files: ContextFileEntry[];
 }
 
+export interface ContextPersistencePolicy {
+  roots: string[];
+  exclude: string[];
+}
+
+export interface RuntimeStateMetadata {
+  provider: RuntimeProvider | string;
+  mode: "provider-persistence" | "provider-snapshot" | "provider-volume" | "disabled" | string;
+  sandboxName?: string;
+  persistent?: boolean;
+  currentSnapshotId?: string;
+  sourceSnapshotId?: string;
+  updatedAt: string;
+  details?: Record<string, unknown>;
+}
+
 export interface ContextCheckpointRecord {
   version: 1;
   generation: number;
@@ -174,8 +195,12 @@ export interface ContextFileManager {
 }
 
 export interface RuntimeProvisioner {
-  createSessionRuntime(options?: Record<string, unknown>): Promise<RuntimeAdapter>;
+  createSessionRuntime(options?: RuntimeProvisionOptions): Promise<RuntimeAdapter>;
   destroyRuntime?(runtime: RuntimeAdapter): Promise<void>;
+}
+
+export interface RuntimeProvisionOptions {
+  contextId?: ContextId;
 }
 
 export interface RuntimeCapabilities {
@@ -198,6 +223,7 @@ export interface StartContextSessionOptions extends Omit<AttachContextOptions, "
   runtime: RuntimeAdapter;
   createIfMissing?: boolean;
   size?: string | number;
+  persistencePolicy?: Partial<ContextPersistencePolicy>;
 }
 
 export interface RunWithContextOptions extends Omit<StartContextSessionOptions, "runtime"> {
@@ -210,8 +236,11 @@ export interface RunWithContextOptions extends Omit<StartContextSessionOptions, 
     intervalMs?: number;
     enabled?: boolean;
   };
+  persistencePolicy?: Partial<ContextPersistencePolicy>;
+  runtimeState?: "auto" | "disabled";
 }
 
 export interface CheckpointContextOptions {
   reason?: string;
+  persistencePolicy?: Partial<ContextPersistencePolicy>;
 }

@@ -1,6 +1,6 @@
 # E2B Blind Retrieval
 
-Goal: seed a context with synthetic project data, mount it in E2B, and hand another AI only the sandbox/runtime prompt.
+Goal: seed a context with synthetic project data, mount it in E2B, and hand another AI only the runtime prompt.
 
 ```bash
 export E2B_API_KEY="..."
@@ -14,6 +14,6 @@ npx contextsdk test blind-retrieval meridian-demo \
   --execute
 ```
 
-Give `handoff-prompt.md` to the other AI. Do not give it `answer-key.md`.
+Give `handoff-prompt.md` to the other AI. Keep `answer-key.md` separate.
 
 Expected result: the other AI finds the missing Northwind Data Trust SOC 2 bridge letter and cites files under `/memory`, `/workspace`, and `/artifacts`.

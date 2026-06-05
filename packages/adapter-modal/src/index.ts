@@ -2,7 +2,7 @@ import { dirname } from "node:path";
 import { readFile } from "node:fs/promises";
 import { ModalClient, type ModalClientParams, type Sandbox, type SandboxCreateParams } from "modal";
 import { sanitizeId } from "@contextsdk/core";
-import type { RuntimeAdapter, RuntimeCommandResult, RuntimeRunOptions } from "@contextsdk/core";
+import type { RuntimeAdapter, RuntimeCommandResult, RuntimeProvisionOptions, RuntimeRunOptions } from "@contextsdk/core";
 
 export interface ModalAdapterOptions {
   sandbox?: Sandbox;
@@ -87,7 +87,7 @@ export class ModalSandboxAdapter implements RuntimeAdapter {
 export class ModalProvisioner {
   constructor(private readonly options: ModalAdapterOptions = {}) {}
 
-  async createSessionRuntime(options: ModalAdapterOptions = {}): Promise<RuntimeAdapter> {
+  async createSessionRuntime(options: RuntimeProvisionOptions & ModalAdapterOptions = {}): Promise<RuntimeAdapter> {
     return ModalSandboxAdapter.create({ ...this.options, ...options });
   }
 
