@@ -7,7 +7,7 @@ export E2B_API_KEY="..."
 export CONTEXTSDK_S3_BUCKET="agent-contexts"
 export CONTEXTSDK_PASSPHRASE="..."
 
-npx contextsdk test blind-retrieval meridian-demo \
+node packages/cli/dist/cli.js test blind-retrieval meridian-demo \
   --runtime e2b \
   --prompt-out handoff-prompt.md \
   --answer-out answer-key.md \

@@ -3,7 +3,7 @@
 Goal: use a Modal Volume-backed context directory while still exporting the encrypted portable bundle to S3-compatible storage.
 
 ```bash
-npx contextsdk run modal-demo \
+node packages/cli/dist/cli.js run modal-demo \
   --runtime modal \
   --modal-app contextsdk \
   --modal-volume contextsdk-contexts \
@@ -11,7 +11,7 @@ npx contextsdk run modal-demo \
   --create-if-missing \
   -- sh -lc 'echo "modal state" > /workspace/provider.txt'
 
-npx contextsdk run modal-demo \
+node packages/cli/dist/cli.js run modal-demo \
   --runtime modal \
   --modal-app contextsdk \
   --modal-volume contextsdk-contexts \

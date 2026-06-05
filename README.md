@@ -41,6 +41,26 @@ Vercel is the first runtime-state implementation. By default, contextSDK uses a 
 
 ## Install
 
+Published packages:
+
+```bash
+npm install @contextsdk/core
+npm install @contextsdk/core @contextsdk/adapter-vercel
+npm install @contextsdk/core @contextsdk/adapter-e2b
+npm install @contextsdk/core @contextsdk/adapter-modal
+```
+
+Published on npm now:
+
+- `@contextsdk/core@0.1.0`
+- `@contextsdk/adapter-e2b@0.1.0`
+- `@contextsdk/adapter-vercel@0.1.0`
+- `@contextsdk/adapter-modal@0.1.0`
+
+The CLI package is prepared as `@contextsdk/cli@0.1.0`, but it is not published yet. Use the local workspace CLI until `npm view @contextsdk/cli version` succeeds.
+
+Local development:
+
 ```bash
 npm install
 npm run build
@@ -49,7 +69,7 @@ npm run build
 Local CLI:
 
 ```bash
-npx contextsdk --help
+node packages/cli/dist/cli.js --help
 ```
 
 ## Configure
@@ -110,33 +130,33 @@ Provider credentials stay in the environment. The CLI reads `E2B_API_KEY`, Verce
 Check local setup:
 
 ```bash
-npx contextsdk doctor
+node packages/cli/dist/cli.js doctor
 ```
 
 Create a context:
 
 ```bash
-npx contextsdk init employee-robert --format tree
+node packages/cli/dist/cli.js init employee-robert --format tree
 ```
 
 Run in E2B, checkpoint every five minutes, save, detach, and shut the sandbox down:
 
 ```bash
 export E2B_API_KEY="..."
-npx contextsdk run employee-robert --runtime e2b --create-if-missing --checkpoint-interval 5m -- sh -lc 'echo ok > /workspace/result.txt'
+node packages/cli/dist/cli.js run employee-robert --runtime e2b --create-if-missing --checkpoint-interval 5m -- sh -lc 'echo ok > /workspace/result.txt'
 ```
 
 Run the same context in Vercel Sandbox:
 
 ```bash
-npx contextsdk run employee-robert --runtime vercel --create-if-missing -- sh -lc 'echo vercel >> /memory/session.md'
+node packages/cli/dist/cli.js run employee-robert --runtime vercel --create-if-missing -- sh -lc 'echo vercel >> /memory/session.md'
 ```
 
 Use Vercel runtime state for dependency-heavy work:
 
 ```bash
-npx contextsdk run employee-robert --runtime vercel --create-if-missing -- sh -lc 'npm install && echo ok > /workspace/result.txt'
-npx contextsdk run employee-robert --runtime vercel -- sh -lc 'test -d node_modules && cat /workspace/result.txt'
+node packages/cli/dist/cli.js run employee-robert --runtime vercel --create-if-missing -- sh -lc 'npm install && echo ok > /workspace/result.txt'
+node packages/cli/dist/cli.js run employee-robert --runtime vercel -- sh -lc 'test -d node_modules && cat /workspace/result.txt'
 ```
 
 The second run resumes the same named sandbox by default. `node_modules` stays in Vercel provider state. `/workspace/result.txt` is saved in the encrypted portable context bundle. To force an ephemeral Vercel sandbox, pass `--runtime-state disabled --no-vercel-persistent`.
@@ -144,32 +164,32 @@ The second run resumes the same named sandbox by default. `node_modules` stays i
 Run it in Modal:
 
 ```bash
-npx contextsdk run employee-robert --runtime modal --create-if-missing -- sh -lc 'echo modal > /workspace/provider.txt'
+node packages/cli/dist/cli.js run employee-robert --runtime modal --create-if-missing -- sh -lc 'echo modal > /workspace/provider.txt'
 ```
 
 Probe a runtime before using it:
 
 ```bash
-npx contextsdk probe --runtime e2b
-npx contextsdk probe --runtime vercel
-npx contextsdk probe --runtime modal
+node packages/cli/dist/cli.js probe --runtime e2b
+node packages/cli/dist/cli.js probe --runtime vercel
+node packages/cli/dist/cli.js probe --runtime modal
 ```
 
 Manual lifecycle:
 
 ```bash
-npx contextsdk session start employee-robert --runtime e2b --create-if-missing
-npx contextsdk files write employee-robert workspace/notes.txt "hello" --runtime e2b --sandbox-id <sandbox-id>
-npx contextsdk session checkpoint employee-robert --runtime e2b --sandbox-id <sandbox-id> --reason "manual checkpoint"
-npx contextsdk session save employee-robert --runtime e2b --sandbox-id <sandbox-id> --message "manual save"
-npx contextsdk session end employee-robert --runtime e2b --sandbox-id <sandbox-id> --owner <owner-from-start>
+node packages/cli/dist/cli.js session start employee-robert --runtime e2b --create-if-missing
+node packages/cli/dist/cli.js files write employee-robert workspace/notes.txt "hello" --runtime e2b --sandbox-id <sandbox-id>
+node packages/cli/dist/cli.js session checkpoint employee-robert --runtime e2b --sandbox-id <sandbox-id> --reason "manual checkpoint"
+node packages/cli/dist/cli.js session save employee-robert --runtime e2b --sandbox-id <sandbox-id> --message "manual save"
+node packages/cli/dist/cli.js session end employee-robert --runtime e2b --sandbox-id <sandbox-id> --owner <owner-from-start>
 ```
 
 Blind retrieval and crash-recovery trials:
 
 ```bash
-npx contextsdk test blind-retrieval demo --runtime e2b --prompt-out handoff.md --answer-out answer-key.md --execute
-npx contextsdk test crash-recovery demo --runtime vercel --execute
+node packages/cli/dist/cli.js test blind-retrieval demo --runtime e2b --prompt-out handoff.md --answer-out answer-key.md --execute
+node packages/cli/dist/cli.js test crash-recovery demo --runtime vercel --execute
 ```
 
 ## SDK example
@@ -257,6 +277,6 @@ python scripts/validate_portable_fs.py --local-to-vm
 npm run typecheck
 npm test
 npm run build
-npx contextsdk doctor
-npx contextsdk run --help
+node packages/cli/dist/cli.js doctor
+node packages/cli/dist/cli.js run --help
 ```

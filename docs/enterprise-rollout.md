@@ -92,3 +92,18 @@ This is not chatbot memory. It is operating context for AI work: files, notes, a
 The pitch I would use internally:
 
 Keep the sandbox temporary. Keep the work. Let provider snapshots handle the machine.
+
+## Current Package Status
+
+Published on npm:
+
+- `@contextsdk/core@0.1.0`
+- `@contextsdk/adapter-e2b@0.1.0`
+- `@contextsdk/adapter-vercel@0.1.0`
+- `@contextsdk/adapter-modal@0.1.0`
+
+Prepared but not yet published:
+
+- `@contextsdk/cli@0.1.0`
+
+The CLI package is ready, but npm still requires a fresh OTP or a granular token with permission to create/publish `@contextsdk/cli`.
