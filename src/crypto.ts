@@ -1,40 +1,86 @@
-import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
+import { createCipheriv, createDecipheriv, randomBytes, scrypt } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import { pipeline } from "node:stream/promises";
-import type { EncryptionConfig, EncryptionMetadata } from "./types.js";
+import { promisify } from "node:util";
+import type { EncryptionConfig, EncryptionMetadata, ScryptParams } from "./types.js";
 import { ContextSDKError } from "./errors.js";
 
 const keyLength = 32;
+const scryptAsync = promisify(scrypt) as (
+  password: string,
+  salt: Buffer,
+  keylen: number,
+  options: { N: number; r: number; p: number; maxmem: number },
+) => Promise<Buffer>;
+
+/** OWASP-aligned default for new encryptions: N=2^17, r=8, p=1 (~128 MiB). */
+export const defaultScryptParams: ScryptParams = { cost: 131072, blockSize: 8, parallelization: 1 };
+
+/** Parameters used by bundles written before scrypt params were recorded in metadata (Node.js defaults). */
+export const legacyScryptParams: ScryptParams = { cost: 16384, blockSize: 8, parallelization: 1 };
 
 export async function encryptFile(inputPath: string, outputPath: string, config: EncryptionConfig): Promise<EncryptionMetadata> {
-  const salt = config.rawKeyHex ? undefined : randomBytes(16);
+  const useRawKey = Boolean(config.rawKeyHex);
+  const salt = useRawKey ? undefined : randomBytes(16);
   const nonce = randomBytes(12);
-  const key = deriveKey(config, salt);
+  const scryptParams = useRawKey ? undefined : resolveScryptParams(config.scrypt);
+  const key = await deriveKey(config, useRawKey ? "raw" : "scrypt", salt, scryptParams);
   const cipher = createCipheriv("aes-256-gcm", key, nonce);
   await pipeline(createReadStream(inputPath), cipher, createWriteStream(outputPath, { mode: 0o600 }));
   return {
     version: 1,
     algorithm: "aes-256-gcm",
-    keyDerivation: config.rawKeyHex ? "raw" : "scrypt",
+    keyDerivation: useRawKey ? "raw" : "scrypt",
     salt: salt?.toString("base64"),
     nonce: nonce.toString("base64"),
     authTag: cipher.getAuthTag().toString("base64"),
+    scrypt: scryptParams,
   };
 }
 
 export async function decryptFile(inputPath: string, outputPath: string, metadata: EncryptionMetadata, config: EncryptionConfig): Promise<void> {
+  if (metadata.version !== 1) {
+    throw new ContextSDKError(`unsupported encryption metadata version: ${String(metadata.version)}`);
+  }
   if (metadata.algorithm !== "aes-256-gcm") {
     throw new ContextSDKError(`unsupported encryption algorithm: ${metadata.algorithm}`);
   }
   const salt = metadata.salt ? Buffer.from(metadata.salt, "base64") : undefined;
-  const key = deriveKey(config, salt);
+  const scryptParams = metadata.keyDerivation === "scrypt" ? metadata.scrypt ?? legacyScryptParams : undefined;
+  const key = await deriveKey(config, metadata.keyDerivation, salt, scryptParams);
   const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(metadata.nonce, "base64"));
   decipher.setAuthTag(Buffer.from(metadata.authTag, "base64"));
   await pipeline(createReadStream(inputPath), decipher, createWriteStream(outputPath, { mode: 0o600 }));
 }
 
-function deriveKey(config: EncryptionConfig, salt?: Buffer): Buffer {
-  if (config.rawKeyHex) {
+export function resolveScryptParams(overrides?: Partial<ScryptParams>): ScryptParams {
+  const params = {
+    cost: overrides?.cost ?? defaultScryptParams.cost,
+    blockSize: overrides?.blockSize ?? defaultScryptParams.blockSize,
+    parallelization: overrides?.parallelization ?? defaultScryptParams.parallelization,
+  };
+  if (!Number.isInteger(params.cost) || params.cost < 2 || (params.cost & (params.cost - 1)) !== 0) {
+    throw new ContextSDKError("scrypt cost must be a power of two greater than one");
+  }
+  if (!Number.isInteger(params.blockSize) || params.blockSize < 1) {
+    throw new ContextSDKError("scrypt blockSize must be a positive integer");
+  }
+  if (!Number.isInteger(params.parallelization) || params.parallelization < 1) {
+    throw new ContextSDKError("scrypt parallelization must be a positive integer");
+  }
+  return params;
+}
+
+async function deriveKey(
+  config: EncryptionConfig,
+  derivation: "scrypt" | "raw",
+  salt: Buffer | undefined,
+  scryptParams: ScryptParams | undefined,
+): Promise<Buffer> {
+  if (derivation === "raw") {
+    if (!config.rawKeyHex) {
+      throw new ContextSDKError("this context was encrypted with a raw key; rawKeyHex is required to decrypt it");
+    }
     const raw = Buffer.from(config.rawKeyHex, "hex");
     if (raw.byteLength !== keyLength) {
       throw new ContextSDKError("raw encryption key must be exactly 32 bytes encoded as hex");
@@ -42,10 +88,17 @@ function deriveKey(config: EncryptionConfig, salt?: Buffer): Buffer {
     return raw;
   }
   if (!config.passphrase) {
-    throw new ContextSDKError("encryption passphrase or rawKeyHex is required");
+    throw new ContextSDKError("encryption passphrase is required");
   }
   if (!salt) {
     throw new ContextSDKError("scrypt encryption metadata is missing salt");
   }
-  return scryptSync(config.passphrase, salt, keyLength);
+  const params = scryptParams ?? defaultScryptParams;
+  return scryptAsync(config.passphrase, salt, keyLength, {
+    N: params.cost,
+    r: params.blockSize,
+    p: params.parallelization,
+    // scrypt needs 128 * N * r bytes; double it for headroom so Node does not reject the derivation.
+    maxmem: 256 * params.cost * params.blockSize,
+  });
 }

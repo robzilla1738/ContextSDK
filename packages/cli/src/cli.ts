@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { Command } from "commander";
 import { createJiti } from "jiti";
 import { E2BAdapter, E2BProvisioner } from "@contextsdk/adapter-e2b";
@@ -37,12 +39,14 @@ import type {
 } from "@contextsdk/core";
 import type { RuntimeAdapter } from "@contextsdk/core";
 
+const cliPackage = createRequire(import.meta.url)("../package.json") as { version: string };
+
 const program = new Command();
 
 program
   .name("contextsdk")
   .description("Portable encrypted context state for agent sandboxes and VMs")
-  .version("0.2.0");
+  .version(cliPackage.version);
 
 program
   .command("doctor")
@@ -131,13 +135,14 @@ addRuntimeOptions(program
       if (!command) {
         return { exitCode: 0, stdout: "", stderr: "" };
       }
-      const completed = await session.runtime.run(`cd ${shellQuote(session.mountPath)} && ${command}`, { user: "root" });
-      if (completed.exitCode !== 0) {
-        throw new Error(`session command failed with exit code ${completed.exitCode}\n${completed.stdout}\n${completed.stderr}`.trim());
-      }
-      return completed;
+      // The command result is reported, not thrown: throwing would funnel command
+      // output into error logs and collapse the real exit code down to 1.
+      return session.runtime.run(`cd ${shellQuote(session.mountPath)} && ${command}`, { user: "root" });
     });
-    printJson({ ok: true, result });
+    printJson({ ok: result.exitCode === 0, result });
+    if (result.exitCode !== 0) {
+      process.exitCode = result.exitCode;
+    }
   });
 
 addRuntimeOptions(program
@@ -194,8 +199,9 @@ addRuntimeOptions(session
   .argument("<id>", "context id")
   .option("--message <message>", "version save message", "manual save")
   .option("--author <author>", "version author", "contextsdk")
+  .option("--owner <owner>", "lock owner emitted by session start; enables ownership verification before writing")
   .option("--mount-path <path>", "mount path inside the runtime"))
-  .action(async (id: string, options: RuntimeCliOptions & { message: string; author: string; mountPath?: string }) => {
+  .action(async (id: string, options: RuntimeCliOptions & { message: string; author: string; owner?: string; mountPath?: string }) => {
     const runtime = await runtimeFromOptions(options, id);
     const active = mountedFromCli(id, runtime, options);
     const manifest = await saveContextSession(buildSession(runtime, active), {
@@ -232,8 +238,9 @@ addRuntimeOptions(session
   .command("checkpoint")
   .argument("<id>", "context id")
   .option("--reason <reason>", "checkpoint reason", "manual")
+  .option("--owner <owner>", "lock owner emitted by session start; enables ownership verification before writing")
   .option("--mount-path <path>", "mount path inside the runtime"))
-  .action(async (id: string, options: RuntimeCliOptions & { reason: string; mountPath?: string }) => {
+  .action(async (id: string, options: RuntimeCliOptions & { reason: string; owner?: string; mountPath?: string }) => {
     const runtime = await runtimeFromOptions(options, id);
     const active = mountedFromCli(id, runtime, options);
     const manifest = await checkpointContextSession(buildSession(runtime, active), {
@@ -272,11 +279,13 @@ addRuntimeOptions(files
   .command("write")
   .argument("<id>", "context id")
   .argument("<path>", "managed path")
-  .argument("<data>", "text data")
+  .argument("[data]", "text data; omit and pipe input with --stdin for sensitive values")
+  .option("--stdin", "read data from standard input so it never appears in shell history or process listings")
   .option("--mount-path <path>", "mount path inside the runtime"))
-  .action(async (id: string, path: string, data: string, options: RuntimeCliOptions & { mountPath?: string }) => {
+  .action(async (id: string, path: string, data: string | undefined, options: RuntimeCliOptions & { mountPath?: string; stdin?: boolean }) => {
+    const payload = await resolveWriteData(data, options.stdin);
     const runtime = await runtimeFromOptions(options, id);
-    await buildSession(runtime, mountedFromCli(id, runtime, options)).files.write(path, data);
+    await buildSession(runtime, mountedFromCli(id, runtime, options)).files.write(path, payload);
     printJson({ ok: true });
   });
 
@@ -679,10 +688,12 @@ function printJson(value: unknown): void {
   console.log(JSON.stringify(value, null, 2));
 }
 
-function mountedFromCli(id: string, runtime: RuntimeAdapter, options: { mountPath?: string }): Parameters<typeof buildSession>[1] {
+function mountedFromCli(id: string, runtime: RuntimeAdapter, options: { mountPath?: string; owner?: string }): Parameters<typeof buildSession>[1] {
   return {
     id,
-    owner: "cli",
+    // An empty owner skips lock-ownership verification; pass --owner from
+    // `session start` output to enforce the one-active-writer check on saves.
+    owner: options.owner ?? "",
     runtimeId: runtime.id,
     mountPath: options.mountPath ?? runtime.defaultMountPath?.(id) ?? defaultMountPath(id),
     remoteImagePath: remoteImagePath(id),
@@ -812,7 +823,44 @@ function hasCommand(command: string): boolean {
   }
 }
 
-program.parseAsync(process.argv).catch(error => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+async function resolveWriteData(data: string | undefined, useStdin?: boolean): Promise<string | Buffer> {
+  if (useStdin && data !== undefined) {
+    throw new Error("provide either <data> or --stdin, not both");
+  }
+  if (useStdin || data === undefined) {
+    if (data === undefined && !useStdin && process.stdin.isTTY) {
+      throw new Error("provide <data> or pipe input with --stdin");
+    }
+    return readStdin();
+  }
+  return data;
+}
+
+async function readStdin(): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
+}
+
+function isDirectInvocation(): boolean {
+  if (!process.argv[1]) {
+    return false;
+  }
+  try {
+    // realpath resolves the npm bin symlink so the guard holds for installed CLIs.
+    return pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url;
+  } catch {
+    return false;
+  }
+}
+
+if (isDirectInvocation()) {
+  program.parseAsync(process.argv).catch(error => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}
+
+export { firstNumber, parseDurationMs, program };

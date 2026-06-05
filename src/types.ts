@@ -5,9 +5,20 @@ export type ContextId = string;
 export type ContextFormat = "tree" | "ext4";
 export type RuntimeProvider = "e2b" | "vercel" | "modal" | "ssh" | "unknown";
 
+export interface ScryptParams {
+  /** CPU/memory cost (N). Must be a power of two. */
+  cost: number;
+  /** Block size (r). */
+  blockSize: number;
+  /** Parallelization (p). */
+  parallelization: number;
+}
+
 export interface EncryptionConfig {
   passphrase?: string;
   rawKeyHex?: string;
+  /** Override scrypt parameters for new encryptions. Decryption always uses the parameters recorded in metadata. */
+  scrypt?: Partial<ScryptParams>;
 }
 
 export interface EncryptionMetadata {
@@ -17,6 +28,8 @@ export interface EncryptionMetadata {
   salt?: string;
   nonce: string;
   authTag: string;
+  /** scrypt parameters used for key derivation. Absent on legacy bundles, which used cost=16384, blockSize=8, parallelization=1. */
+  scrypt?: ScryptParams;
 }
 
 export interface ContextManifest {

@@ -556,7 +556,7 @@ def main(argv: list[str] | None = None) -> int:
         summary["passed"] = True
         setup_succeeded = True
         summary["finished_at"] = datetime.now(timezone.utc).isoformat()
-        write_json(summary_path, summary)
+        write_json(summary_path, summary, mode=0o600)
         print(f"Synthetic context trial ready: {artifact_dir}")
         print(f"Sandbox id: {summary['sandbox_id']}")
         print(f"Handoff prompt: {handoff_prompt_path}")
@@ -565,7 +565,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         summary["error"] = logger.redact(f"{type(exc).__name__}: {exc}")
         summary["finished_at"] = datetime.now(timezone.utc).isoformat()
-        write_json(summary_path, summary)
+        write_json(summary_path, summary, mode=0o600)
         print(f"Synthetic context trial failed. Summary: {summary_path}")
         return 1
     finally:

@@ -203,4 +203,50 @@ describe("enterprise broker", () => {
     expect(runtime.disposed).toBe(true);
     expect(audit.events.some(event => event.action === "context.run" && event.outcome === "success")).toBe(true);
   });
+
+  it("records an audit failure when the policy engine throws", async () => {
+    const storage = new MemoryStorage();
+    const audit = new InMemoryAuditSink();
+    const broker = new EnterpriseContextBroker({
+      storage,
+      encryption: { passphrase: "passphrase" },
+      audit,
+      policy: {
+        async authorize() {
+          throw new Error("policy backend unreachable");
+        },
+      },
+    });
+
+    await expect(broker.create({ actor, contextId: "ctx-policy-crash", size: "16M" }))
+      .rejects.toThrow(/policy backend unreachable/);
+    expect(audit.events.some(event =>
+      event.action === "context.create"
+      && event.outcome === "failure"
+      && event.reason?.includes("policy engine error"),
+    )).toBe(true);
+  });
+
+  it("records an audit failure when the quota manager throws", async () => {
+    const storage = new MemoryStorage();
+    const audit = new InMemoryAuditSink();
+    const broker = new EnterpriseContextBroker({
+      storage,
+      encryption: { passphrase: "passphrase" },
+      audit,
+      quota: {
+        async check() {
+          throw new Error("quota backend unreachable");
+        },
+      },
+    });
+
+    await expect(broker.create({ actor, contextId: "ctx-quota-crash", size: "16M" }))
+      .rejects.toThrow(/quota backend unreachable/);
+    expect(audit.events.some(event =>
+      event.action === "context.create"
+      && event.outcome === "failure"
+      && event.reason?.includes("quota manager error"),
+    )).toBe(true);
+  });
 });

@@ -1,6 +1,6 @@
 {
   "name": "@contextsdk/adapter-e2b",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "E2B runtime adapter for contextSDK",
   "license": "MIT",
   "type": "module",
@@ -13,7 +13,14 @@
   "bugs": {
     "url": "https://github.com/robzilla1738/ContextSDK/issues"
   },
-  "keywords": ["ai", "agents", "sandbox", "filesystem", "persistence", "e2b"],
+  "keywords": [
+    "ai",
+    "agents",
+    "sandbox",
+    "filesystem",
+    "persistence",
+    "e2b"
+  ],
   "publishConfig": {
     "access": "public"
   },
@@ -23,13 +30,19 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist", "README.md"],
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@contextsdk/core": "0.1.0",
+    "@contextsdk/core": "^0.2.0",
     "e2b": "^1.11.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
   }
 }

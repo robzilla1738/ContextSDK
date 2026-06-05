@@ -84,6 +84,51 @@ export async function assertSafeArchive(archivePath: string): Promise<void> {
       throw new ContextSDKError(`unsafe archive entry: ${entry}`);
     }
   }
+  // `tar -tf` hides entry types and link targets, so a second, verbose pass guards
+  // against symlink/hardlink escapes and special files that the name check cannot see.
+  const verbose = await runCapture("sh", ["-lc", `zstd -dc ${shellArg(archivePath)} | tar -tvf -`]);
+  for (const rawLine of verbose.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) {
+      continue;
+    }
+    const typeChar = line[0];
+    if (typeChar === "b" || typeChar === "c" || typeChar === "p" || typeChar === "s") {
+      throw new ContextSDKError(`unsafe archive entry type '${typeChar}': ${line}`);
+    }
+    if (typeChar === "l") {
+      const marker = line.indexOf(" -> ");
+      if (marker === -1) {
+        throw new ContextSDKError(`unreadable symlink archive entry: ${line}`);
+      }
+      if (line.indexOf(" -> ", marker + 4) !== -1) {
+        // More than one marker means the name or target embeds the separator;
+        // the target cannot be parsed unambiguously, so fail closed.
+        throw new ContextSDKError(`ambiguous symlink archive entry: ${line}`);
+      }
+      assertSafeLinkTarget(line.slice(marker + 4), line);
+    }
+    // Only entries typed 'h' are hardlinks; matching " link to " on other lines
+    // would falsely reject regular files whose names contain that text.
+    if (typeChar === "h") {
+      const hardlinkMarker = line.lastIndexOf(" link to ");
+      if (hardlinkMarker === -1) {
+        throw new ContextSDKError(`unreadable hardlink archive entry: ${line}`);
+      }
+      assertSafeLinkTarget(line.slice(hardlinkMarker + " link to ".length), line);
+    }
+  }
+}
+
+function assertSafeLinkTarget(target: string, line: string): void {
+  const trimmed = target.trim();
+  if (
+    trimmed.startsWith("/")
+    || trimmed.includes("\0")
+    || trimmed.split("/").includes("..")
+  ) {
+    throw new ContextSDKError(`unsafe archive link target: ${line}`);
+  }
 }
 
 async function writeTreeIndex(root: string): Promise<void> {

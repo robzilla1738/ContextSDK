@@ -9,7 +9,7 @@ import {
   S3Client,
   type S3ClientConfig,
 } from "@aws-sdk/client-s3";
-import { ContextSDKError } from "./errors.js";
+import { ObjectNotFoundError, StorageConditionError } from "./errors.js";
 import { readableToBuffer, type ObjectMetadata, type PutObjectOptions, type StorageAdapter } from "./storage.js";
 
 export interface S3StorageOptions {
@@ -31,12 +31,19 @@ export class S3Storage implements StorageAdapter {
   }
 
   async getObject(key: string): Promise<Buffer> {
+    return (await this.getObjectWithMetadata(key)).body;
+  }
+
+  async getObjectWithMetadata(key: string): Promise<{ body: Buffer; metadata: ObjectMetadata }> {
     try {
       const response = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: this.key(key) }));
-      return readableToBuffer(response.Body);
+      return {
+        body: await readableToBuffer(response.Body),
+        metadata: { size: response.ContentLength, updatedAt: response.LastModified, etag: response.ETag },
+      };
     } catch (error) {
       if (isMissingObject(error)) {
-        throw new ContextSDKError(`object not found: ${key}`);
+        throw new ObjectNotFoundError(key);
       }
       throw error;
     }
@@ -51,7 +58,21 @@ export class S3Storage implements StorageAdapter {
     if (options.ifNoneMatch) {
       commandInput.IfNoneMatch = options.ifNoneMatch;
     }
-    await this.client.send(new PutObjectCommand(commandInput));
+    if (options.ifMatch) {
+      commandInput.IfMatch = options.ifMatch;
+    }
+    try {
+      await this.client.send(new PutObjectCommand(commandInput));
+    } catch (error) {
+      if (isConditionFailure(error)) {
+        throw new StorageConditionError(
+          options.ifNoneMatch
+            ? `object already exists: ${key}`
+            : `precondition failed for object: ${key}`,
+        );
+      }
+      throw error;
+    }
   }
 
   async deleteObject(key: string): Promise<void> {
@@ -61,7 +82,7 @@ export class S3Storage implements StorageAdapter {
   async headObject(key: string): Promise<ObjectMetadata | null> {
     try {
       const response = await this.client.send(new HeadObjectCommand({ Bucket: this.bucket, Key: this.key(key) }));
-      return { size: response.ContentLength, updatedAt: response.LastModified };
+      return { size: response.ContentLength, updatedAt: response.LastModified, etag: response.ETag };
     } catch (error) {
       if (isMissingObject(error)) {
         return null;
@@ -77,4 +98,13 @@ export class S3Storage implements StorageAdapter {
 
 function isMissingObject(error: unknown): boolean {
   return error instanceof NoSuchKey || error instanceof NotFound || (typeof error === "object" && error !== null && ["NoSuchKey", "NotFound", "404"].includes(String((error as { name?: string }).name)));
+}
+
+function isConditionFailure(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+  const name = String((error as { name?: string }).name);
+  const status = (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode;
+  return name === "PreconditionFailed" || name === "ConditionalRequestConflict" || status === 412 || status === 409;
 }

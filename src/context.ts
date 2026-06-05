@@ -5,7 +5,7 @@ import { encryptFile, decryptFile } from "./crypto.js";
 import { ContextSDKError } from "./errors.js";
 import { createArtifactsApi, createLogsApi, createMemoryApi, MountedContextFileManager } from "./file-manager.js";
 import { createExt4Image, parseSize, validateExt4Image } from "./local-image.js";
-import { acquireLock, makeOwner, readLock, releaseLock } from "./lock.js";
+import { acquireLock, assertLockOwnership, defaultLockTtlMs, makeOwner, readLock, releaseLock, renewLock } from "./lock.js";
 import { contextKeys, defaultLayout, defaultMountPath, remoteBundlePath, remoteImagePath } from "./paths.js";
 import { resolvePersistencePolicy } from "./persistence-policy.js";
 import { assertSuccess } from "./runtime.js";
@@ -14,9 +14,11 @@ import { shellQuote } from "./shell.js";
 import { packContextTree, prepareContextTree, unpackContextTree } from "./tree-bundle.js";
 import { snapshotScript } from "./versioning.js";
 import type { RuntimeAdapter } from "./runtime.js";
+import type { StorageAdapter } from "./storage.js";
 import type {
   AttachContextOptions,
   CheckpointContextOptions,
+  ContextLock,
   ContextManifest,
   ContextSession,
   ContextVersionRecord,
@@ -29,9 +31,35 @@ import type {
   StartContextSessionOptions,
 } from "./types.js";
 
+/**
+ * Manifest version records are summaries: full per-file indexes live inside the
+ * bundle at .contextsdk/versions/<generation>.json. Keeping them in the manifest
+ * would grow it without bound.
+ */
+const maxManifestVersions = 50;
+
+const sessionWriteQueues = new WeakMap<object, Promise<unknown>>();
+
+/**
+ * Serializes manifest-writing operations (save, checkpoint, runtime-state updates)
+ * for one mounted session, so a periodic checkpoint cannot interleave with a save
+ * and clobber the manifest generation it read.
+ */
+function withSessionWriteLock<T>(key: object, fn: () => Promise<T>): Promise<T> {
+  const previous = sessionWriteQueues.get(key) ?? Promise.resolve();
+  const run = previous.then(fn, fn);
+  sessionWriteQueues.set(key, run.then(() => undefined, () => undefined));
+  return run;
+}
+
+function toManifestVersionRecord(record: ContextVersionRecord): ContextVersionRecord {
+  return { ...record, files: [] };
+}
+
 export async function createContext(options: CreateContextOptions): Promise<ContextManifest> {
   const keys = contextKeys(options.id);
-  if (!options.force && await options.storage.headObject(keys.manifest)) {
+  const alreadyExisted = Boolean(await options.storage.headObject(keys.manifest));
+  if (!options.force && alreadyExisted) {
     throw new ContextSDKError(`context already exists: ${options.id}`);
   }
   const tempDir = await mkdtemp(join(tmpdir(), "contextsdk-create-"));
@@ -70,11 +98,23 @@ export async function createContext(options: CreateContextOptions): Promise<Cont
       createdAt: now,
       updatedAt: now,
     };
-    await options.storage.putObject(keys.tree, await readFile(encryptedTreePath));
-    if (format === "ext4") {
-      await options.storage.putObject(keys.image, await readFile(encryptedPath));
+    const writtenKeys: string[] = [];
+    try {
+      await options.storage.putObject(keys.tree, await readFile(encryptedTreePath));
+      writtenKeys.push(keys.tree);
+      if (format === "ext4") {
+        await options.storage.putObject(keys.image, await readFile(encryptedPath));
+        writtenKeys.push(keys.image);
+      }
+      await options.storage.putObject(keys.manifest, JSON.stringify(manifest, null, 2));
+    } catch (error) {
+      // A fresh context that failed mid-create would otherwise leave orphaned
+      // objects. Never roll back when force-recreating over an existing context.
+      if (!alreadyExisted) {
+        await Promise.allSettled(writtenKeys.map(key => options.storage.deleteObject(key)));
+      }
+      throw error;
     }
-    await options.storage.putObject(keys.manifest, JSON.stringify(manifest, null, 2));
     return manifest;
   } finally {
     await rm(tempDir, { recursive: true, force: true });
@@ -92,7 +132,7 @@ export async function attachContext(options: AttachContextOptions): Promise<Moun
     contextId: options.id,
     runtimeId: options.runtime.id,
     owner,
-    ttlMs: options.lockTtlMs ?? 30 * 60 * 1000,
+    ttlMs: options.lockTtlMs ?? defaultLockTtlMs,
     force: options.forceUnlock,
   });
 
@@ -154,6 +194,11 @@ export async function attachContext(options: AttachContextOptions): Promise<Moun
 }
 
 export async function saveContext(options: SaveContextOptions): Promise<ContextManifest> {
+  if (options.owner) {
+    // A writer whose lock expired and was taken over must not clobber the new
+    // writer's data. Callers without an owner (manual CLI saves) skip this check.
+    await assertLockOwnership({ storage: options.storage, contextId: options.id, owner: options.owner });
+  }
   const manifest = await readManifest(options.storage, options.id);
   const mountPath = options.mountPath ?? options.runtime.defaultMountPath?.(options.id) ?? defaultMountPath(options.id);
   const remotePath = remoteImagePath(options.id);
@@ -192,16 +237,21 @@ export async function saveContext(options: SaveContextOptions): Promise<ContextM
         sizeBytes = (await stat(rawPath)).size;
       }
     }
+    // An explicit ext4 context stays ext4 only when this save refreshed the image;
+    // otherwise the filtered tree bundle is the only current data and the manifest
+    // must say so, or a later loop-ext4 attach would load a stale image.
+    const keepExt4Format = manifest.format === "ext4" && shouldPersistExt4Image && Boolean(imageEncryption);
+    const versionSummary = toManifestVersionRecord(version);
     const updated: ContextManifest = {
       ...manifest,
-      format: "tree",
-      filesystem: "tree",
+      format: keepExt4Format ? "ext4" : "tree",
+      filesystem: keepExt4Format ? "ext4" : "tree",
       generation: nextGeneration,
       encryption: treeEncryption,
       treeEncryption,
       imageEncryption,
-      latestVersion: version,
-      versions: [...(manifest.versions ?? []), version],
+      latestVersion: versionSummary,
+      versions: [...(manifest.versions ?? []), versionSummary].slice(-maxManifestVersions),
       persistencePolicy,
       runtimeState: await runtimeStateForManifest(options.runtime, options.runtimeState, manifest.runtimeState),
       updatedAt: new Date().toISOString(),
@@ -245,12 +295,21 @@ export async function withContext<T>(
   fn: (mounted: MountedContext) => Promise<T>,
 ): Promise<T> {
   const mounted = await attachContext(options);
+  const lockRenewal = startLockRenewalTimer({
+    storage: options.storage,
+    contextId: options.id,
+    owner: mounted.owner,
+    lockTtlMs: options.lockTtlMs,
+  });
   try {
     const result = await fn(mounted);
     await saveContext({ ...options, owner: mounted.owner, mountPath: mounted.mountPath });
     return result;
   } finally {
-    await detachContext({ storage: options.storage, runtime: options.runtime, id: options.id, owner: mounted.owner, mountPath: mounted.mountPath }).catch(() => undefined);
+    lockRenewal.stop();
+    await detachContext({ storage: options.storage, runtime: options.runtime, id: options.id, owner: mounted.owner, mountPath: mounted.mountPath }).catch(error => {
+      process.emitWarning(`contextSDK: detach failed for ${options.id}: ${error instanceof Error ? error.message : String(error)}`);
+    });
     await rm(mounted.localTempDir, { recursive: true, force: true });
   }
 }
@@ -283,13 +342,13 @@ export async function saveContextSession(
   session: ContextSession,
   options: Omit<SaveContextOptions, "id" | "runtime" | "mountPath" | "owner">,
 ): Promise<ContextManifest> {
-  return saveContext({
+  return withSessionWriteLock(session.mounted, () => saveContext({
     ...options,
     id: session.id,
     runtime: session.runtime,
     mountPath: session.mountPath,
     owner: session.owner,
-  });
+  }));
 }
 
 export async function checkpointContextSession(
@@ -299,6 +358,19 @@ export async function checkpointContextSession(
     encryption: SaveContextOptions["encryption"];
   },
 ): Promise<ContextManifest> {
+  return withSessionWriteLock(session.mounted, () => checkpointContextSessionInner(session, options));
+}
+
+async function checkpointContextSessionInner(
+  session: ContextSession,
+  options: CheckpointContextOptions & {
+    storage: SaveContextOptions["storage"];
+    encryption: SaveContextOptions["encryption"];
+  },
+): Promise<ContextManifest> {
+  if (session.owner) {
+    await assertLockOwnership({ storage: options.storage, contextId: session.id, owner: session.owner });
+  }
   const manifest = await readManifest(options.storage, session.id);
   const persistencePolicy = resolvePersistencePolicy(options.persistencePolicy ?? manifest.persistencePolicy);
   const keys = contextKeys(session.id);
@@ -347,14 +419,20 @@ export async function endContextSession(
   session: ContextSession,
   options: Omit<DetachContextOptions, "id" | "runtime" | "mountPath" | "owner">,
 ): Promise<void> {
-  await detachContext({
-    ...options,
-    id: session.id,
-    runtime: session.runtime,
-    mountPath: session.mountPath,
-    owner: session.owner,
-  });
-  await rm(session.mounted.localTempDir, { recursive: true, force: true });
+  try {
+    await detachContext({
+      ...options,
+      id: session.id,
+      runtime: session.runtime,
+      mountPath: session.mountPath,
+      owner: session.owner,
+    });
+  } finally {
+    // The temp dir holds decrypted context data; it must go even when detach fails.
+    if (session.mounted.localTempDir) {
+      await rm(session.mounted.localTempDir, { recursive: true, force: true });
+    }
+  }
 }
 
 export async function runWithContext<T>(
@@ -366,8 +444,15 @@ export async function runWithContext<T>(
   const session = await startContextSession({ ...options, runtime });
   let shouldSave = true;
   const checkpointTimer = startCheckpointTimer(session, options);
+  const lockRenewal = startLockRenewalTimer({
+    storage: options.storage,
+    contextId: options.id,
+    owner: session.owner,
+    lockTtlMs: options.lockTtlMs,
+  });
   const signalFinalizer = installSignalFinalizer(async signal => {
     checkpointTimer.stop();
+    lockRenewal.stop();
     await saveContextSession(session, {
       storage: options.storage,
       encryption: options.encryption,
@@ -383,7 +468,7 @@ export async function runWithContext<T>(
       ? undefined
       : await runtime.finalizeRuntimeState?.().catch(() => undefined);
     if (finalizedRuntimeState) {
-      await updateManifestRuntimeState(options.storage, options.id, finalizedRuntimeState).catch(() => undefined);
+      await withSessionWriteLock(session.mounted, () => updateManifestRuntimeState(options.storage, options.id, finalizedRuntimeState)).catch(() => undefined);
     }
     if (createdRuntime) {
       await options.provisioner?.destroyRuntime?.(runtime).catch(() => undefined);
@@ -391,6 +476,7 @@ export async function runWithContext<T>(
   });
   try {
     const result = await fn(session);
+    checkpointTimer.stop();
     await saveContextSession(session, {
       storage: options.storage,
       encryption: options.encryption,
@@ -402,6 +488,7 @@ export async function runWithContext<T>(
     shouldSave = false;
     return result;
   } catch (error) {
+    checkpointTimer.stop();
     if (options.saveOnError ?? true) {
       await session.logs.append(`runWithContext failure: ${error instanceof Error ? error.message : String(error)}`).catch(() => undefined);
       await saveContextSession(session, {
@@ -428,9 +515,12 @@ export async function runWithContext<T>(
         runtimeState: options.runtimeState,
       }).catch(() => undefined);
     }
+    lockRenewal.stop();
     await endContextSession(session, {
       storage: options.storage,
-    }).catch(() => undefined);
+    }).catch(error => {
+      process.emitWarning(`contextSDK: session cleanup failed for ${options.id}: ${error instanceof Error ? error.message : String(error)}`);
+    });
     const finalizedRuntimeState = options.runtimeState === "disabled"
       ? undefined
       : await runtime.finalizeRuntimeState?.().catch(() => undefined);
@@ -439,7 +529,7 @@ export async function runWithContext<T>(
     }
     const runtimeState = finalizedRuntimeState ?? (options.runtimeState === "disabled" ? undefined : await runtime.getRuntimeState?.().catch(() => undefined));
     if (runtimeState) {
-      await updateManifestRuntimeState(options.storage, options.id, runtimeState).catch(() => undefined);
+      await withSessionWriteLock(session.mounted, () => updateManifestRuntimeState(options.storage, options.id, runtimeState)).catch(() => undefined);
     }
   }
 }
@@ -482,11 +572,14 @@ export async function readManifest(storage: { getObject(key: string): Promise<Bu
   return normalizeManifest(JSON.parse((await storage.getObject(contextKeys(id).manifest)).toString("utf8")), id);
 }
 
-export async function statusContext(options: { id: string; storage: { getObject(key: string): Promise<Buffer>; headObject(key: string): Promise<unknown> } }): Promise<{ manifest: ContextManifest | null; lock: unknown }> {
+export async function statusContext(options: {
+  id: string;
+  storage: Pick<StorageAdapter, "getObject" | "headObject">;
+}): Promise<{ manifest: ContextManifest | null; lock: ContextLock | null }> {
   const manifest = await options.storage.headObject(contextKeys(options.id).manifest)
     ? await readManifest(options.storage, options.id)
     : null;
-  return { manifest, lock: await readLock(options.storage as never, options.id) };
+  return { manifest, lock: await readLock(options.storage, options.id) };
 }
 
 function parseLoopDevice(stdout: string): string | undefined {
@@ -535,6 +628,42 @@ function startCheckpointTimer(session: ContextSession, options: RunWithContextOp
       running = false;
     });
   }, intervalMs);
+  timer.unref?.();
+  return {
+    stop() {
+      clearInterval(timer);
+    },
+  };
+}
+
+/**
+ * Keeps the storage-backed lock alive for long sessions. Without renewal a
+ * session outliving the lock TTL silently loses exclusivity and another writer
+ * can take over mid-run.
+ */
+function startLockRenewalTimer(options: {
+  storage: StorageAdapter;
+  contextId: string;
+  owner: string;
+  lockTtlMs?: number;
+}): { stop(): void } {
+  const ttlMs = options.lockTtlMs ?? defaultLockTtlMs;
+  const intervalMs = Math.max(Math.floor(ttlMs / 3), 30_000);
+  let warned = false;
+  const timer = setInterval(() => {
+    renewLock({
+      storage: options.storage,
+      contextId: options.contextId,
+      owner: options.owner,
+      ttlMs,
+    }).catch(error => {
+      if (!warned) {
+        warned = true;
+        process.emitWarning(`contextSDK: lock renewal failed for ${options.contextId}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    });
+  }, intervalMs);
+  timer.unref?.();
   return {
     stop() {
       clearInterval(timer);

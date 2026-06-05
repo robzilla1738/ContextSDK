@@ -27,9 +27,12 @@ export function mountScript(imagePath: string, mountPath: string): string {
     `mountpoint=${shellQuote(mountPath)}`,
     "mkdir -p \"$mountpoint\"",
     "loopdev=\"$(losetup --find --show \"$image\")\"",
+    // Release the loop device if anything after losetup fails; cleared on success.
+    "trap 'losetup -d \"$loopdev\" 2>/dev/null || true' EXIT",
     "mount -t ext4 \"$loopdev\" \"$mountpoint\"",
     "for root in workspace memory artifacts logs cache config; do mkdir -p \"$mountpoint/$root\"; if [ -L \"/$root\" ] || [ ! -e \"/$root\" ]; then ln -sfn \"$mountpoint/$root\" \"/$root\"; fi; done",
     "findmnt --target \"$mountpoint\"",
+    "trap - EXIT",
     "printf 'CONTEXTSDK_MOUNT_JSON=%s\\n' \"{\\\"loopDevice\\\":\\\"$loopdev\\\",\\\"mountPath\\\":\\\"$mountpoint\\\",\\\"remoteImagePath\\\":\\\"$image\\\"}\"",
   ].join("\n");
 }
@@ -60,6 +63,8 @@ export function unpackBundleScript(bundlePath: string, mountPath: string, policy
     "        shutil.rmtree(path)",
     "PY",
     "zstd -dc \"$bundle\" | tar -C \"$mountpoint\" -xf -",
+    // The bundle on the runtime is decrypted context data; remove it once extracted.
+    "rm -f \"$bundle\"",
     "for root in workspace memory artifacts logs cache config; do mkdir -p \"$mountpoint/$root\"; if [ -L \"/$root\" ] || [ ! -e \"/$root\" ]; then ln -sfn \"$mountpoint/$root\" \"/$root\"; fi; done",
     "printf 'CONTEXTSDK_MOUNT_JSON=%s\\n' \"{\\\"mountPath\\\":\\\"$mountpoint\\\",\\\"remoteBundlePath\\\":\\\"$bundle\\\",\\\"mode\\\":\\\"directoryBundle\\\"}\"",
   ].join("\n");
@@ -92,9 +97,20 @@ export function packBundleScript(bundlePath: string, mountPath: string, policy?:
     "        if fnmatch.fnmatch(rel, pattern) or fnmatch.fnmatch(rel, trimmed) or (trimmed and rel.startswith(trimmed.rstrip('/') + '/')):",
     "            return True",
     "    return False",
+    "def unsafe_link(info):",
+    "    if not (info.issym() or info.islnk()):",
+    "        return False",
+    "    target = info.linkname.replace('\\\\', '/')",
+    "    return target.startswith('/') or '..' in target.split('/')",
     "def tar_filter(info):",
     "    rel = info.name.replace('\\\\', '/')",
-    "    return None if excluded(rel) else info",
+    "    if excluded(rel):",
+    "        return None",
+    "    if unsafe_link(info):",
+    "        return None",
+    "    if not (info.isfile() or info.isdir() or info.issym() or info.islnk()):",
+    "        return None",
+    "    return info",
     "with tarfile.open(tar_path, 'w') as archive:",
     "    seen = set()",
     "    for root in roots:",
@@ -118,7 +134,8 @@ export function saveScript(imagePath: string, mountPath: string): string {
     "source=\"$(findmnt -n -o SOURCE --target \"$mountpoint\" || true)\"",
     "test -n \"$source\"",
     "sync",
-    "umount \"$mountpoint\"",
+    // Busy filesystems are common right after agent workloads; retry once before failing.
+    "umount \"$mountpoint\" || { sync; sleep 1; umount \"$mountpoint\"; }",
     "if printf '%s' \"$source\" | grep -q '^/dev/loop'; then losetup -d \"$source\"; fi",
     "e2fsck -fn \"$image\"",
   ].join("\n");

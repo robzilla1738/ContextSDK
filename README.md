@@ -48,20 +48,18 @@ npm install @contextsdk/core
 npm install @contextsdk/core @contextsdk/adapter-vercel
 npm install @contextsdk/core @contextsdk/adapter-e2b
 npm install @contextsdk/core @contextsdk/adapter-modal
+npm install -g @contextsdk/cli
 ```
 
-Published on npm now:
+Published on npm now (install verified):
 
 - `@contextsdk/core@0.1.0`
 - `@contextsdk/adapter-e2b@0.1.0`
 - `@contextsdk/adapter-vercel@0.1.0`
 - `@contextsdk/adapter-modal@0.1.0`
-
-Prepared but not currently installable from npm:
-
 - `@contextsdk/cli@0.1.0`
 
-npm accepted the CLI publish and reports the `latest` dist-tag, but public `npm view` and install still return 404. Until that registry state resolves, use the built local CLI from this checkout.
+This repository is at `0.2.0` (unpublished). The 0.2.0 release hardens lock acquisition with conditional writes, adds lock renewal for long sessions, records scrypt parameters in encryption metadata (with a stronger default), validates symlink and hardlink entries in bundles, and bounds manifest version history. Note: `contextsdk --version` from the published 0.1.0 binary misreports `0.2.0`; that bug is fixed in this repo.
 
 Local development:
 
@@ -258,6 +256,15 @@ Modal:
 - Runs `sync` before checkpoints and final saves.
 - Exports the same encrypted tree bundle so the context can move to another provider.
 
+## Security model
+
+- Bundles and images are encrypted with AES-256-GCM. Decryption authenticates the ciphertext; tampered data fails to decrypt.
+- Passphrase keys are derived with scrypt. New bundles record their scrypt parameters in metadata and default to `cost=131072, blockSize=8, parallelization=1`; bundles written before parameters were recorded decrypt with the legacy Node.js defaults. Raw 32-byte keys (`rawKeyHex`) skip derivation.
+- One active writer per context is enforced with storage-backed locks acquired through conditional writes (`If-None-Match` on create, ETag `If-Match` on expired-lock takeover). Sessions renew the lock at one third of its TTL, and saves verify lock ownership before writing.
+- Bundle extraction validates archive entries: path traversal, absolute paths, escaping symlink or hardlink targets, and special files (devices, FIFOs, sockets) are rejected.
+- Decrypted data exists in two places during a session: a private local temp directory (mode 0600/0700, removed when the session ends, including on detach failure) and the runtime itself, which must see plaintext to do work. Treat runtime compromise as context compromise for that session.
+- Secrets are read from the environment, never from argv. Use `contextsdk files write --stdin` to keep sensitive file content out of shell history.
+
 ## Enterprise shape
 
 The enterprise version puts a Context Broker in front of the SDK. The broker decides who can attach which context, enforces one active writer, records audit events, runs DLP or artifact scanning before save, and handles retention or legal hold.
@@ -283,4 +290,5 @@ npm test
 npm run build
 node packages/cli/dist/cli.js doctor
 node packages/cli/dist/cli.js run --help
+node packages/cli/dist/cli.js probe --help
 ```

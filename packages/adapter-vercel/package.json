@@ -1,6 +1,6 @@
 {
   "name": "@contextsdk/adapter-vercel",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Vercel Sandbox runtime adapter for contextSDK",
   "license": "MIT",
   "type": "module",
@@ -13,7 +13,14 @@
   "bugs": {
     "url": "https://github.com/robzilla1738/ContextSDK/issues"
   },
-  "keywords": ["ai", "agents", "sandbox", "filesystem", "persistence", "vercel"],
+  "keywords": [
+    "ai",
+    "agents",
+    "sandbox",
+    "filesystem",
+    "persistence",
+    "vercel"
+  ],
   "publishConfig": {
     "access": "public"
   },
@@ -23,13 +30,19 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist", "README.md"],
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@contextsdk/core": "0.1.0",
+    "@contextsdk/core": "^0.2.0",
     "@vercel/sandbox": "^2.1.1"
+  },
+  "engines": {
+    "node": ">=20.0.0"
   }
 }

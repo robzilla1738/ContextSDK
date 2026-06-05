@@ -28,7 +28,10 @@ Do not collapse these layers. The portable context is the cross-provider source 
 - Never write secrets into repo files, logs, fixtures, docs, or artifacts.
 - Never use text APIs for raw image or bundle transfer.
 - Keep decrypted local temp files private and delete them after use.
-- Enforce one active writer per context with storage-backed locks.
+- Enforce one active writer per context with storage-backed locks. Lock acquisition uses conditional writes (`ifNoneMatch` on create, ETag `ifMatch` on expired-lock takeover), sessions renew the lock at TTL/3, and saves assert lock ownership when an owner is known.
+- Decryption follows the parameters recorded in `EncryptionMetadata` (including scrypt params); never change defaults in a way that breaks decryption of existing bundles.
+- Reject archive entries that traverse paths, contain absolute or `..` link targets, or are special files (devices, FIFOs, sockets).
+- Manifest version records are bounded summaries (`files: []`, capped history); full per-file indexes live inside the bundle at `.contextsdk/versions/`.
 - Portable bundles must default to user/agent state only.
 - Keep dependency-heavy paths out of the portable bundle by default:
   - `**/node_modules/**`
@@ -69,18 +72,17 @@ SSH:
 
 ## Package Status
 
-Published on npm:
+Published on npm (install verified on 2026-06-04 via `npm install` in a clean directory):
 
 - `@contextsdk/core@0.1.0`
 - `@contextsdk/adapter-e2b@0.1.0`
 - `@contextsdk/adapter-vercel@0.1.0`
 - `@contextsdk/adapter-modal@0.1.0`
-
-Prepared but not currently installable from npm:
-
 - `@contextsdk/cli@0.1.0`
 
-npm accepted the CLI publish and reports the `latest` dist-tag, but public `npm view` and install still return 404. Keep docs honest until user install verification succeeds.
+The repository is at `0.2.0` (unpublished). 0.2.0 adds: conditional-write (ETag CAS) lock acquisition and renewal, lock-ownership assertion on save, scrypt parameters recorded in encryption metadata with a stronger default (cost 2^17), symlink/hardlink/special-file validation in bundles, bounded manifest version history, and CLI fixes (dynamic version, exit-code propagation, `files write --stdin`).
+
+Compatibility note: bundles encrypted by 0.2.0 with the new default scrypt parameters cannot be decrypted by 0.1.0 (it ignores the recorded parameters). 0.2.0 reads 0.1.0 bundles fine.
 
 ## Commands
 

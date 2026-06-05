@@ -1,40 +1,66 @@
+import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
-import { ContextSDKError } from "./errors.js";
+import { ContextSDKError, ObjectNotFoundError, StorageConditionError } from "./errors.js";
 
 export interface PutObjectOptions {
+  /** Fail with StorageConditionError when the object already exists. Use "*" to match any existing object. */
   ifNoneMatch?: string;
+  /** Fail with StorageConditionError unless the stored object's etag matches. Enables compare-and-swap updates. */
+  ifMatch?: string;
 }
 
 export interface ObjectMetadata {
   size?: number;
   updatedAt?: Date;
+  etag?: string;
 }
 
 export interface StorageAdapter {
   getObject(key: string): Promise<Buffer>;
+  /**
+   * Atomically read body and etag of one object revision. Locking depends on it:
+   * expired-lock takeover refuses to proceed without an etag to compare-and-swap on.
+   */
+  getObjectWithMetadata(key: string): Promise<{ body: Buffer; metadata: ObjectMetadata }>;
   putObject(key: string, body: Buffer | Uint8Array | string, options?: PutObjectOptions): Promise<void>;
   deleteObject(key: string): Promise<void>;
   headObject(key: string): Promise<ObjectMetadata | null>;
 }
 
 export class MemoryStorage implements StorageAdapter {
-  private readonly objects = new Map<string, { body: Buffer; updatedAt: Date }>();
+  private readonly objects = new Map<string, { body: Buffer; updatedAt: Date; etag: string }>();
 
   async getObject(key: string): Promise<Buffer> {
     const object = this.objects.get(key);
     if (!object) {
-      throw new ContextSDKError(`object not found: ${key}`);
+      throw new ObjectNotFoundError(key);
     }
     return Buffer.from(object.body);
   }
 
+  async getObjectWithMetadata(key: string): Promise<{ body: Buffer; metadata: ObjectMetadata }> {
+    const object = this.objects.get(key);
+    if (!object) {
+      throw new ObjectNotFoundError(key);
+    }
+    return {
+      body: Buffer.from(object.body),
+      metadata: { size: object.body.byteLength, updatedAt: object.updatedAt, etag: object.etag },
+    };
+  }
+
   async putObject(key: string, body: Buffer | Uint8Array | string, options: PutObjectOptions = {}): Promise<void> {
-    if (options.ifNoneMatch === "*" && this.objects.has(key)) {
-      throw new ContextSDKError(`object already exists: ${key}`);
+    const existing = this.objects.get(key);
+    if (options.ifNoneMatch === "*" && existing) {
+      throw new StorageConditionError(`object already exists: ${key}`);
+    }
+    if (options.ifMatch !== undefined && (!existing || existing.etag !== options.ifMatch)) {
+      throw new StorageConditionError(`precondition failed for object: ${key}`);
     }
     this.objects.set(key, {
       body: Buffer.isBuffer(body) ? Buffer.from(body) : Buffer.from(body),
       updatedAt: new Date(),
+      etag: randomUUID(),
     });
   }
 
@@ -47,7 +73,7 @@ export class MemoryStorage implements StorageAdapter {
     if (!object) {
       return null;
     }
-    return { size: object.body.byteLength, updatedAt: object.updatedAt };
+    return { size: object.body.byteLength, updatedAt: object.updatedAt, etag: object.etag };
   }
 }
 

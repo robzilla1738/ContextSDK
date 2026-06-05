@@ -325,12 +325,24 @@ export class EnterpriseContextBroker {
   }
 
   private async enforce(request: EnterpriseContextRequest): Promise<void> {
-    const policy = await this.policy.authorize(request);
+    let policy: PolicyDecision;
+    try {
+      policy = await this.policy.authorize(request);
+    } catch (error) {
+      await this.record(request, "failure", `policy engine error: ${errorMessage(error)}`);
+      throw error;
+    }
     if (!policy.allow) {
       await this.record(request, "deny", policy.reason);
       throw new ContextSDKError(`policy denied ${request.action}: ${policy.reason}`);
     }
-    const quota = await this.quota.check(request);
+    let quota: QuotaDecision;
+    try {
+      quota = await this.quota.check(request);
+    } catch (error) {
+      await this.record(request, "failure", `quota manager error: ${errorMessage(error)}`);
+      throw error;
+    }
     if (!quota.allow) {
       await this.record(request, "deny", quota.reason);
       throw new ContextSDKError(`quota denied ${request.action}: ${quota.reason}`);

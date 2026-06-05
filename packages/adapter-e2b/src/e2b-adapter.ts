@@ -76,11 +76,9 @@ export class E2BAdapter implements RuntimeAdapter {
           stderr: error.stderr || error.error || "",
         };
       }
-      return {
-        exitCode: 1,
-        stdout: "",
-        stderr: String(error),
-      };
+      // Timeouts, network failures, and dead sandboxes are infrastructure errors,
+      // not command results; mapping them to exitCode 1 would hide sandbox loss.
+      throw error;
     }
   }
 

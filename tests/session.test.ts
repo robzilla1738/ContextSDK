@@ -1,7 +1,9 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import { contextKeys } from "../src/paths.js";
-import { createContext, readManifest, runWithContext } from "../src/context.js";
+import { attachContext, createContext, readManifest, runWithContext, saveContext } from "../src/context.js";
+import { ContextLockError } from "../src/errors.js";
+import { acquireLock, readLock } from "../src/lock.js";
 import { MemoryStorage } from "../src/storage.js";
 import type { PutObjectOptions } from "../src/storage.js";
 import type { RuntimeAdapter, RuntimeCommandResult } from "../src/runtime.js";
@@ -26,8 +28,8 @@ class FakeRuntime implements RuntimeAdapter {
           timestamp: "2026-01-01T00:00:00Z",
           author: "test-agent",
           message: "test save",
-          changedPaths: [],
-          files: [],
+          changedPaths: [{ path: "workspace/task.txt", type: "added" }],
+          files: [{ path: "workspace/task.txt", size: 11, mode: "0o644", mtime: "2026-01-01T00:00:00Z", sha256: "abc" }],
         })}\n`,
         stderr: "",
       };
@@ -155,5 +157,61 @@ describe("provisioned sessions", () => {
     expect(runtime.commands.some(command => command.includes("runWithContext failure"))).toBe(true);
     expect(runtime.commands.some(command => command.includes("CONTEXTSDK_VERSION_JSON"))).toBe(true);
     expect(runtime.disposed).toBe(true);
+  });
+
+  it("stores bounded version summaries without per-file indexes in the manifest", async () => {
+    const storage = new MemoryStorage();
+    await createContext({ id: "test-versions", size: "16M", storage, encryption: { passphrase: "passphrase" } });
+    const runtime = new FakeRuntime();
+    await runWithContext({
+      id: "test-versions",
+      storage,
+      encryption: { passphrase: "passphrase" },
+      provisioner: {
+        async createSessionRuntime() {
+          return runtime;
+        },
+      },
+    }, async () => undefined);
+
+    const manifest = await readManifest(storage, "test-versions");
+    expect(manifest.versions?.length).toBeGreaterThan(0);
+    expect(manifest.latestVersion?.changedPaths).toEqual([{ path: "workspace/task.txt", type: "added" }]);
+    // Full per-file indexes live inside the bundle, not the manifest.
+    expect(manifest.latestVersion?.files).toEqual([]);
+    for (const version of manifest.versions ?? []) {
+      expect(version.files).toEqual([]);
+    }
+  });
+
+  it("releases the lock when attach fails", async () => {
+    const storage = new MemoryStorage();
+    await createContext({ id: "test-attach-fail", size: "16M", storage, encryption: { passphrase: "passphrase" } });
+    const runtime = new FakeRuntime();
+    runtime.uploadFile = async () => {
+      throw new Error("upload exploded");
+    };
+    await expect(attachContext({
+      id: "test-attach-fail",
+      storage,
+      encryption: { passphrase: "passphrase" },
+      runtime,
+    })).rejects.toThrow(/upload exploded/);
+    await expect(readLock(storage, "test-attach-fail")).resolves.toBeNull();
+  });
+
+  it("refuses to save when the lock belongs to another writer", async () => {
+    const storage = new MemoryStorage();
+    await createContext({ id: "test-ownership", size: "16M", storage, encryption: { passphrase: "passphrase" } });
+    await acquireLock({ storage, contextId: "test-ownership", runtimeId: "runtime-b", owner: "owner-b", ttlMs: 60_000 });
+    const runtime = new FakeRuntime();
+    await expect(saveContext({
+      id: "test-ownership",
+      storage,
+      encryption: { passphrase: "passphrase" },
+      runtime,
+      owner: "owner-a",
+    })).rejects.toThrow(ContextLockError);
+    expect(runtime.commands).toHaveLength(0);
   });
 });

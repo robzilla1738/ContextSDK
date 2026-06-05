@@ -54,7 +54,11 @@ class RedactingLogger:
         value = "" if text is None else str(text)
         for secret in self._secrets:
             value = value.replace(secret, "<redacted:E2B_API_KEY>")
-        return re.sub(r"e2b_[A-Za-z0-9]+", "<redacted:e2b_api_key>", value)
+        value = re.sub(r"e2b_[A-Za-z0-9]+", "<redacted:e2b_api_key>", value)
+        home = str(Path.home())
+        if home and home != "/":
+            value = value.replace(home, "~")
+        return value
 
     def write(self, text: object = "") -> None:
         with self.path.open("a", encoding="utf-8") as handle:
@@ -774,8 +778,9 @@ def sandbox_id(sandbox: Any) -> str:
 
 
 def write_summary(path: Path, summary: dict[str, Any], logger_a: RedactingLogger, logger_b: RedactingLogger) -> None:
-    redacted = json.loads(logger_a.redact(json.dumps(summary, indent=2, sort_keys=True)))
+    redacted = json.loads(logger_b.redact(logger_a.redact(json.dumps(summary, indent=2, sort_keys=True))))
     path.write_text(json.dumps(redacted, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.chmod(0o600)
     for log_path in (logger_a.path, logger_b.path, path):
         text = log_path.read_text(encoding="utf-8")
         redacted_text = logger_a.redact(text)
