@@ -136,14 +136,20 @@ describe("tree bundles", () => {
     }
   });
 
-  it.runIf(canArchive)("rejects archives with traversal entries", async () => {
+  it.runIf(canArchive && hasCommand("python3"))("rejects archives with traversal entries", async () => {
     const dir = await mkdtemp(join(tmpdir(), "contextsdk-unsafe-tree-test-"));
     try {
-      const src = join(dir, "src");
+      // BSD and GNU tar disagree on rename flags (-s vs --transform) and both
+      // normalize ".." prefixes away, so craft the archive with python tarfile.
       const unsafeTar = join(dir, "unsafe.tar");
       const unsafeZstd = join(dir, "unsafe.tar.zst");
-      await prepareContextTree({ root: src, contextId: "unsafe" });
-      execFileSync("tar", ["-C", src, "-s", "@workspace/README.md@../escape.md@", "-cf", unsafeTar, "workspace/README.md"]);
+      execFileSync("python3", ["-c", [
+        "import tarfile",
+        `archive = tarfile.open(${JSON.stringify(unsafeTar)}, 'w')`,
+        "info = tarfile.TarInfo('../escape.md')",
+        "archive.addfile(info)",
+        "archive.close()",
+      ].join("\n")]);
       execFileSync("zstd", ["-q", "-f", unsafeTar, "-o", unsafeZstd]);
 
       await expect(assertSafeArchive(unsafeZstd)).rejects.toThrow(/unsafe archive entry/);
