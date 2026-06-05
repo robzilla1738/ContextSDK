@@ -90,13 +90,13 @@ SSH:
 
 Published on npm (install verified on 2026-06-05 via `npm install` in a clean directory):
 
-- `@contextsdk/core@0.2.0`
-- `@contextsdk/adapter-e2b@0.2.0`
-- `@contextsdk/adapter-vercel@0.2.0`
-- `@contextsdk/adapter-modal@0.2.0`
-- `@contextsdk/cli@0.2.0`
+- `@contextsdk/core@0.3.0`
+- `@contextsdk/adapter-e2b@0.3.0`
+- `@contextsdk/adapter-vercel@0.3.0`
+- `@contextsdk/adapter-modal@0.3.0`
+- `@contextsdk/cli@0.3.0`
 
-The repository is at `0.3.0` (unreleased). See `CHANGELOG.md` for the full list: generation-keyed save commit protocol with manifest CAS, GCM tag/nonce pinning, e2b SDK v2, sandbox lifetime defaults + keepAlive, E2B transfer retries, runtime-side archive validation with bomb caps, local `FsStorage` default for the CLI, SSH adapter overhaul, adapters declaring core as a peer dependency, and a CLI breaking change (`run` output).
+0.3.0 (tagged `v0.3.0`) is the current release. See `CHANGELOG.md` for the full list: generation-keyed save commit protocol with manifest CAS, GCM tag/nonce pinning, e2b SDK v2, sandbox lifetime defaults + keepAlive, E2B transfer retries, runtime-side archive validation with bomb caps, local `FsStorage` default for the CLI, SSH adapter overhaul, adapters declaring core as a peer dependency, and a CLI breaking change (`run` output).
 
 Compatibility: 0.3.0 reads contexts written by 0.1.0/0.2.0 (legacy fixed `current.*` keys migrate on next save), and 0.2.0 can read contexts saved by 0.3.0. Bundles encrypted with the 0.2.0+ default scrypt parameters cannot be decrypted by 0.1.0.
 
@@ -152,7 +152,7 @@ Keep GitHub metadata aligned with the project:
 - Homepage: `https://www.npmjs.com/org/contextsdk`
 - Topics should include: `ai-agents`, `sandbox`, `filesystem`, `persistence`, `typescript`, `e2b`, `vercel`, `modal`
 
-For release tags, use semver tags such as `v0.2.0`.
+For release tags, use semver tags such as `v0.3.0`.
 
 ## Implementation Style
 

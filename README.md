@@ -76,7 +76,7 @@ Bundles are written under fresh generation-scoped keys and the manifest write is
 
 Adapters declare `@contextsdk/core` as a peer dependency; npm 7+ installs it automatically.
 
-Published on npm: `0.2.0` (install verified 2026-06-05). The repository tracks `0.3.0` (unreleased); see [CHANGELOG.md](CHANGELOG.md) for what changed, including one CLI breaking change (`contextsdk run` output).
+Published on npm: `0.3.0` (install verified 2026-06-05). See [CHANGELOG.md](CHANGELOG.md) for what changed since 0.2.0, including one CLI breaking change (`contextsdk run` output).
 
 ## Configure
 

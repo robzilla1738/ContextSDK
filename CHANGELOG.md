@@ -4,7 +4,7 @@ All notable changes to the contextSDK packages are documented here. The project
 follows [semver](https://semver.org); while major version is 0, minor releases
 may contain breaking changes, called out explicitly below.
 
-## 0.3.0 — unreleased
+## 0.3.0 — 2026-06-05
 
 ### Data integrity
 
