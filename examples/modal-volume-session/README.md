@@ -3,7 +3,7 @@
 Goal: use a Modal Volume-backed context directory while still exporting the encrypted portable bundle to storage. With no S3 bucket configured the bundle lands in the local store (`~/.contextsdk/storage`); set `CONTEXTSDK_S3_*` for shared S3-compatible storage.
 
 ```bash
-node packages/cli/dist/cli.js run modal-demo \
+contextsdk run modal-demo \
   --runtime modal \
   --modal-app contextsdk \
   --modal-volume contextsdk-contexts \
@@ -11,7 +11,7 @@ node packages/cli/dist/cli.js run modal-demo \
   --create-if-missing \
   -- sh -lc 'echo "modal state" > /workspace/provider.txt'
 
-node packages/cli/dist/cli.js run modal-demo \
+contextsdk run modal-demo \
   --runtime modal \
   --modal-app contextsdk \
   --modal-volume contextsdk-contexts \

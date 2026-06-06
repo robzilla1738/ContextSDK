@@ -10,7 +10,7 @@ export CONTEXTSDK_PASSPHRASE="..."
 # Optional, for shared storage:
 # export CONTEXTSDK_S3_BUCKET="agent-contexts"
 
-node packages/cli/dist/cli.js test blind-retrieval meridian-demo \
+contextsdk test blind-retrieval meridian-demo \
   --runtime e2b \
   --prompt-out handoff-prompt.md \
   --answer-out answer-key.md \

@@ -5,14 +5,14 @@ Goal: unpack the encrypted context into a Vercel Sandbox, write portable context
 The Vercel Sandbox default runtime image is `python3.13`, so any Node workload must pass a Node runtime (`--vercel-runtime node24`):
 
 ```bash
-node packages/cli/dist/cli.js run vercel-demo \
+contextsdk run vercel-demo \
   --runtime vercel \
   --vercel-runtime node24 \
   --create-if-missing \
   --checkpoint-interval 5m \
   -- sh -lc 'cd /workspace && npm init -y >/dev/null && npm install is-odd >/dev/null && echo "vercel state" > /workspace/result.txt && echo "remember vercel" >> /memory/session.md'
 
-node packages/cli/dist/cli.js run vercel-demo \
+contextsdk run vercel-demo \
   --runtime vercel \
   --vercel-runtime node24 \
   -- sh -lc 'test -d /workspace/node_modules && cat /workspace/result.txt && tail -n 1 /memory/session.md'

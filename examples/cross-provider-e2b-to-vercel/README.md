@@ -3,12 +3,12 @@
 Goal: prove that the same encrypted context can move between providers.
 
 ```bash
-node packages/cli/dist/cli.js run cross-provider-demo \
+contextsdk run cross-provider-demo \
   --runtime e2b \
   --create-if-missing \
   -- sh -lc 'echo "written in e2b" > /workspace/provider-hop.txt'
 
-node packages/cli/dist/cli.js run cross-provider-demo \
+contextsdk run cross-provider-demo \
   --runtime vercel \
   -- sh -lc 'cat /workspace/provider-hop.txt && echo "read in vercel" >> /memory/session.md'
 ```
