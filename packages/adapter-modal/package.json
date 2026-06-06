@@ -1,6 +1,6 @@
 {
   "name": "@contextsdk/adapter-modal",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Modal Sandbox and Volume runtime adapter for contextSDK",
   "license": "MIT",
   "type": "module",
@@ -46,9 +46,9 @@
   },
   "sideEffects": false,
   "peerDependencies": {
-    "@contextsdk/core": "^0.3.0"
+    "@contextsdk/core": "^0.4.0"
   },
   "devDependencies": {
-    "@contextsdk/core": "^0.3.0"
+    "@contextsdk/core": "^0.4.0"
   }
 }

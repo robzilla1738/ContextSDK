@@ -1,6 +1,6 @@
 {
   "name": "@contextsdk/cli",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "CLI for portable encrypted context state",
   "license": "MIT",
   "type": "module",
@@ -42,10 +42,10 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@contextsdk/adapter-e2b": "^0.3.0",
-    "@contextsdk/adapter-modal": "^0.3.0",
-    "@contextsdk/adapter-vercel": "^0.3.0",
-    "@contextsdk/core": "^0.3.0",
+    "@contextsdk/adapter-e2b": "^0.4.0",
+    "@contextsdk/adapter-modal": "^0.4.0",
+    "@contextsdk/adapter-vercel": "^0.4.0",
+    "@contextsdk/core": "^0.4.0",
     "commander": "^14.0.2",
     "jiti": "^2.7.0"
   },
