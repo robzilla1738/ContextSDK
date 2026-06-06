@@ -37,7 +37,11 @@ Bundles are written under fresh, generation-scoped keys (`contexts/<id>/tree/<ge
 
 ## Runtime adapters
 
-`RuntimeAdapter` is the contract an adapter implements. Beyond `run`/`uploadFile`/`downloadFile`, an adapter may implement `keepAlive()`, which the session heartbeat calls periodically to extend a sandbox whose timeout would otherwise auto-terminate it mid-session. Remote pack/unpack/mount/save commands run with a 15-minute timeout by default, overridable per call via the `commandTimeoutMs` option on `runWithContext`, attach, save, and detach.
+`RuntimeAdapter` is the contract an adapter implements. Beyond `run`/`uploadFile`/`downloadFile`, an adapter may implement `keepAlive()`, which the session heartbeat calls periodically to extend a sandbox whose timeout would otherwise auto-terminate it mid-session, and `kill()`, which tears the sandbox down unconditionally (crash simulation / forced teardown — unlike `dispose()`, which only destroys sandboxes the adapter created). Remote pack/unpack/mount/save commands run with a 15-minute timeout by default, overridable per call via the `commandTimeoutMs` option on `runWithContext`, attach, save, and detach.
+
+## Crash detection and recovery
+
+The session heartbeat reports lock-renewal and keepAlive failures; after `recovery.failureThreshold` consecutive failures (default 3) the session is declared degraded and fires one best-effort emergency checkpoint. With the opt-in `recovery: { enabled: true }` option on `runWithContext`, a sandbox that dies mid-run is destroyed, re-provisioned through the same provisioner, and re-attached from the latest committed manifest under the same lock owner; `reinvoke: true` re-runs the callback (off by default — re-execution is the caller's idempotency call), and `onRecover` receives the recovered session. Recovery is refused for caller-supplied runtimes. `onSessionEvent` surfaces `heartbeat-failure`, `degraded`, `emergency-checkpoint`, and `recovery-*` lifecycle events.
 
 A non-zero remote command throws `RuntimeCommandError`, which carries `exitCode`, `stdout`, and `stderr` (all error classes extend `ContextSDKError`).
 

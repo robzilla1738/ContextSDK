@@ -114,6 +114,7 @@ addRuntimeOptions(program
   .option("--format <format>", "context format for --create-if-missing: tree or ext4", "tree")
   .option("--message <message>", "version save message", "contextsdk run")
   .option("--checkpoint-interval <duration>", "periodic checkpoint interval, for example 5m or 300000")
+  .option("--recover", "if the sandbox dies mid-run, re-provision it, restore the latest committed state, and re-run the command")
   .option("--json", "emit a JSON envelope instead of the command's own stdout/stderr")
   .allowUnknownOption(true)
   .allowExcessArguments(true)
@@ -124,6 +125,7 @@ addRuntimeOptions(program
     format: ContextFormat;
     message: string;
     checkpointInterval?: string;
+    recover?: boolean;
     json?: boolean;
   }) => {
     const storage = storageFromEnv();
@@ -139,6 +141,10 @@ addRuntimeOptions(program
     const command = resolvedCommandParts.length > 0 ? resolvedCommandParts.map(shellQuote).join(" ") : "";
     const provisioner = provisionerFromOptions(options);
     const runtime = provisioner ? undefined : await runtimeFromOptions(options, id);
+    if (options.recover && !provisioner) {
+      // Recovery re-provisions the sandbox, which needs a provisioner-owned runtime.
+      process.stderr.write("contextsdk: --recover requires a provisioner-backed runtime (e2b/vercel/modal without an explicit sandbox); recovery is disabled for this run\n");
+    }
     const result = await runWithContext({
       id,
       storage,
@@ -152,6 +158,18 @@ addRuntimeOptions(program
       checkpoint: {
         intervalMs: options.checkpointInterval ? parseDurationMs(options.checkpointInterval) : configFromFile().checkpoint?.intervalMs,
       },
+      // Re-running the wrapped command after a fresh re-provision matches what
+      // the user asked `run` to do; arbitrary SDK callbacks do not get this default.
+      // Without a provisioner recovery is left unset entirely so behavior matches
+      // the warning above, instead of configuring a path the SDK would refuse.
+      recovery: options.recover && provisioner ? { enabled: true, reinvoke: true } : undefined,
+      onSessionEvent: options.recover
+        ? event => {
+          if (event.type !== "heartbeat-failure") {
+            process.stderr.write(`contextsdk: session ${event.type}${event.attempt ? ` (attempt ${event.attempt})` : ""}\n`);
+          }
+        }
+        : undefined,
     }, async session => {
       if (!command) {
         return { exitCode: 0, stdout: "", stderr: "" };
@@ -499,20 +517,24 @@ addRuntimeOptions(test
 
 addRuntimeOptions(test
   .command("crash-recovery")
-  .description("exercise checkpoint-based crash recovery")
+  .description("crash a sandbox mid-session and verify recovery from the latest checkpoint")
   .argument("[id]", "context id", "crash-recovery-demo")
-  .option("--execute", "run a bounded checkpoint recovery smoke test"))
-  .action(async (id: string, options: RuntimeCliOptions & { execute?: boolean }) => {
+  .option("--execute", "run the crash + recovery assertion against a real sandbox")
+  .option("--auto-recovery", "also exercise runWithContext auto-recovery (re-provision and re-run the callback)"))
+  .action(async (id: string, options: RuntimeCliOptions & { execute?: boolean; autoRecovery?: boolean }) => {
     if (!options.execute) {
       printJson({
         ok: true,
         id,
-        scenario: "Run with --execute to create a context, write a pre-crash marker, checkpoint it, and leave the latest checkpoint as the recovery point.",
+        scenario: "Run with --execute to checkpoint a marker, hard-kill the sandbox with an uncheckpointed marker on it, re-attach on a fresh sandbox, and assert the checkpointed marker survived while the uncheckpointed one was lost. Add --auto-recovery to also exercise the runWithContext re-provision + reinvoke path.",
       });
       return;
     }
-    await runCrashRecoveryScenario(id, options);
-    printJson({ ok: true, id });
+    const result = await runCrashRecoveryScenario(id, options);
+    printJson(result);
+    if (!result.ok) {
+      process.exitCode = 1;
+    }
   });
 
 interface RuntimeCliOptions {
@@ -739,25 +761,95 @@ async function runSyntheticBlindRetrieval(id: string, options: RuntimeCliOptions
   });
 }
 
-async function runCrashRecoveryScenario(id: string, options: RuntimeCliOptions): Promise<void> {
+async function runCrashRecoveryScenario(
+  id: string,
+  options: RuntimeCliOptions & { autoRecovery?: boolean },
+): Promise<{ ok: boolean; id: string; phases: Record<string, { pass: boolean } & Record<string, unknown>> }> {
   const storage = storageFromEnv();
   const encryption = encryptionFromEnv();
   if (!await storage.headObject(contextKeys(id).manifest)) {
     await createContext({ id, storage, encryption, format: "tree", persistencePolicy: configFromFile().persistence });
   }
   const provisioner = provisionerFromOptions(options);
-  const runtime = provisioner ? await provisioner.createSessionRuntime({ contextId: id }) : await runtimeFromOptions(options, id);
-  try {
-    const active = await startContextSession({ id, storage, encryption, runtime });
-    await active.files.write("workspace/recovery.txt", `checkpointed at ${new Date().toISOString()}\n`);
-    await checkpointContextSession(active, { storage, encryption, reason: "crash-recovery-test" });
-    await detachContext({ id, storage, runtime, owner: active.owner, mountPath: active.mountPath }).catch(() => undefined);
-  } finally {
-    if (provisioner) {
-      await provisioner.destroyRuntime?.(runtime).catch(() => undefined);
-    }
-    await runtime.dispose?.().catch(() => undefined);
+  if (!provisioner) {
+    throw new Error("crash-recovery --execute needs a provisioner-backed runtime (e2b/vercel/modal without an explicit sandbox): killed sandboxes must be re-provisionable");
   }
+  const stamp = new Date().toISOString();
+
+  // Phase 1: checkpoint a marker, write an uncheckpointed one, hard-kill the
+  // sandbox with no save and no detach — the crash the SDK must recover from.
+  const doomed = await provisioner.createSessionRuntime({ contextId: id });
+  if (!doomed.kill) {
+    throw new Error(`runtime adapter ${doomed.id} does not support kill(); cannot simulate a crash`);
+  }
+  let owner: string;
+  try {
+    const active = await startContextSession({ id, storage, encryption, runtime: doomed });
+    owner = active.owner;
+    await active.files.write("workspace/recovery-checkpointed.txt", `checkpointed at ${stamp}\n`);
+    await checkpointContextSession(active, { storage, encryption, reason: "crash-recovery-test" });
+    await active.files.write("workspace/recovery-lost.txt", `written after the checkpoint at ${stamp}; a hard crash must lose this\n`);
+    await doomed.kill();
+  } finally {
+    await doomed.dispose?.().catch(() => undefined);
+  }
+
+  // Re-attach on a fresh sandbox with the SAME owner: the crashed session's
+  // lock is adopted immediately instead of waiting out its TTL.
+  const fresh = await provisioner.createSessionRuntime({ contextId: id });
+  let checkpointRestored = false;
+  let uncheckpointedLost = false;
+  try {
+    const recovered = await startContextSession({ id, storage, encryption, runtime: fresh, owner });
+    checkpointRestored = (await recovered.files.read("workspace/recovery-checkpointed.txt").catch(() => Buffer.alloc(0))).includes(stamp);
+    uncheckpointedLost = await recovered.files.read("workspace/recovery-lost.txt").then(() => false, () => true);
+    await recovered.files.remove("workspace/recovery-checkpointed.txt").catch(() => undefined);
+    await detachContext({ id, storage, runtime: fresh, owner: recovered.owner, mountPath: recovered.mountPath, mode: recovered.mounted.mode }).catch(() => undefined);
+  } finally {
+    await provisioner.destroyRuntime?.(fresh).catch(() => undefined);
+    await fresh.dispose?.().catch(() => undefined);
+  }
+  const phases: Record<string, { pass: boolean } & Record<string, unknown>> = {
+    crash: { checkpointRestored, uncheckpointedLost, pass: checkpointRestored && uncheckpointedLost },
+  };
+
+  // Phase 2 (opt-in): the session kills its own sandbox mid-callback and
+  // runWithContext must re-provision, restore the checkpoint, and re-run it.
+  if (options.autoRecovery) {
+    let invocations = 0;
+    let recovered = false;
+    let markerSurvived = false;
+    await runWithContext({
+      id,
+      storage,
+      encryption,
+      provisioner,
+      recovery: {
+        enabled: true,
+        reinvoke: true,
+        maxAttempts: 1,
+        onRecover: () => {
+          recovered = true;
+        },
+      },
+      onSessionEvent: event => process.stderr.write(`crash-recovery: ${event.type}\n`),
+    }, async session => {
+      invocations += 1;
+      if (invocations === 1) {
+        await session.files.write("workspace/auto-recovery.txt", `pre-crash at ${stamp}\n`);
+        await checkpointContextSession(session, { storage, encryption, reason: "auto-recovery-test" });
+        await session.runtime.kill?.();
+        // The next command hits a dead sandbox and throws — that is the crash.
+        await session.runtime.run(":");
+        throw new Error("sandbox kill did not take effect");
+      }
+      markerSurvived = (await session.files.read("workspace/auto-recovery.txt")).includes(stamp);
+      await session.files.remove("workspace/auto-recovery.txt").catch(() => undefined);
+    });
+    phases.autoRecovery = { invocations, recovered, markerSurvived, pass: invocations === 2 && recovered && markerSurvived };
+  }
+
+  return { ok: Object.values(phases).every(phase => phase.pass), id, phases };
 }
 
 function requiredEnv(name: string): string {

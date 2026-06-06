@@ -11,6 +11,12 @@ export function makeOwner(): string {
   return `${hostname()}:${process.pid}:${randomUUID()}`;
 }
 
+export interface AcquiredLock {
+  lock: ContextLock;
+  /** True when the caller already held this lock and re-acquisition refreshed it in place. */
+  adopted: boolean;
+}
+
 export async function acquireLock(options: {
   storage: StorageAdapter;
   contextId: string;
@@ -18,12 +24,37 @@ export async function acquireLock(options: {
   owner: string;
   ttlMs: number;
   force?: boolean;
-}): Promise<ContextLock> {
+}): Promise<AcquiredLock> {
   const key = contextKeys(options.contextId).lock;
   const now = new Date();
   const existing = await readLockWithMetadata(options.storage, options.contextId);
   if (existing && !isExpired(existing.lock, now) && !options.force) {
-    throw new ContextLockError(`context ${options.contextId} is locked by ${existing.lock.owner} until ${existing.lock.expiresAt}`);
+    if (existing.lock.owner !== options.owner) {
+      throw new ContextLockError(`context ${options.contextId} is locked by ${existing.lock.owner} until ${existing.lock.expiresAt}`);
+    }
+    // Same-owner adopt: the session that holds this lock is re-attaching (e.g.
+    // recovery onto a fresh sandbox after the old one died). Owner strings are
+    // unique per session, so this can never let a second writer in; like renewal,
+    // it only refreshes a lock we already verified we hold.
+    const renewed: ContextLock = {
+      ...existing.lock,
+      runtimeId: options.runtimeId,
+      heartbeatAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + options.ttlMs).toISOString(),
+    };
+    try {
+      await options.storage.putObject(
+        key,
+        JSON.stringify(renewed, null, 2),
+        existing.etag ? { ifMatch: existing.etag } : undefined,
+      );
+    } catch (error) {
+      if (error instanceof StorageConditionError) {
+        throw new ContextLockError(`context ${options.contextId} lock changed during same-owner re-acquire`);
+      }
+      throw error;
+    }
+    return { lock: renewed, adopted: true };
   }
   const lock: ContextLock = {
     version: 1,
@@ -60,7 +91,7 @@ export async function acquireLock(options: {
     }
     throw error;
   }
-  return lock;
+  return { lock, adopted: false };
 }
 
 export async function renewLock(options: {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ContextLockError } from "../src/errors.js";
 import { acquireLock, assertLockOwnership, readLock, releaseLock, renewLock } from "../src/lock.js";
+import type { AcquiredLock } from "../src/lock.js";
 import { contextKeys } from "../src/paths.js";
 import { MemoryStorage } from "../src/storage.js";
 import type { ContextLock } from "../src/types.js";
@@ -81,8 +82,9 @@ describe("locks", () => {
     expect((losers[0] as PromiseRejectedResult).reason).toBeInstanceOf(ContextLockError);
 
     const lock = await readLock(storage, "ctx");
-    const winner = (winners[0] as PromiseFulfilledResult<ContextLock>).value;
-    expect(lock?.owner).toBe(winner.owner);
+    const winner = (winners[0] as PromiseFulfilledResult<AcquiredLock>).value;
+    expect(lock?.owner).toBe(winner.lock.owner);
+    expect(winner.adopted).toBe(false);
   });
 
   it("refuses expired-lock takeover on adapters that cannot return etags", async () => {
@@ -102,15 +104,29 @@ describe("locks", () => {
     // The stale lock is untouched and force still works.
     expect((await readLock(backing, "ctx"))?.owner).toBe("owner-stale");
     await expect(acquireLock({ storage: minimal, contextId: "ctx", runtimeId: "runtime-a", owner: "owner-a", ttlMs: 60_000, force: true }))
-      .resolves.toMatchObject({ owner: "owner-a" });
+      .resolves.toMatchObject({ lock: { owner: "owner-a" }, adopted: false });
   });
 
   it("renews a held lock and extends its expiry", async () => {
     const storage = new MemoryStorage();
     const original = await acquireLock({ storage, contextId: "ctx", runtimeId: "runtime-a", owner: "owner-a", ttlMs: 1_000 });
     const renewed = await renewLock({ storage, contextId: "ctx", owner: "owner-a", ttlMs: 60_000 });
-    expect(Date.parse(renewed.expiresAt)).toBeGreaterThan(Date.parse(original.expiresAt));
+    expect(Date.parse(renewed.expiresAt)).toBeGreaterThan(Date.parse(original.lock.expiresAt));
     expect((await readLock(storage, "ctx"))?.expiresAt).toBe(renewed.expiresAt);
+  });
+
+  it("adopts an unexpired lock held by the same owner instead of refusing", async () => {
+    const storage = new MemoryStorage();
+    const original = await acquireLock({ storage, contextId: "ctx", runtimeId: "runtime-a", owner: "owner-a", ttlMs: 1_000 });
+    const reacquired = await acquireLock({ storage, contextId: "ctx", runtimeId: "runtime-b", owner: "owner-a", ttlMs: 60_000 });
+    expect(reacquired.adopted).toBe(true);
+    expect(reacquired.lock.owner).toBe("owner-a");
+    expect(reacquired.lock.runtimeId).toBe("runtime-b");
+    expect(reacquired.lock.createdAt).toBe(original.lock.createdAt);
+    expect(Date.parse(reacquired.lock.expiresAt)).toBeGreaterThan(Date.parse(original.lock.expiresAt));
+    // A different owner is still refused while the adopted lock is live.
+    await expect(acquireLock({ storage, contextId: "ctx", runtimeId: "runtime-c", owner: "owner-b", ttlMs: 60_000 }))
+      .rejects.toThrow(/locked by owner-a/);
   });
 
   it("refuses renewal once another writer holds the lock", async () => {

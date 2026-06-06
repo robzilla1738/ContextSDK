@@ -170,6 +170,11 @@ export class VercelSandboxAdapter implements RuntimeAdapter {
       this.stopped = true;
     }
   }
+
+  /** Stops the sandbox unconditionally — crash simulation / forced teardown. Vercel has no harder kill than stop. */
+  async kill(): Promise<void> {
+    await this.dispose();
+  }
 }
 
 export class VercelProvisioner {

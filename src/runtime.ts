@@ -32,6 +32,12 @@ export interface RuntimeAdapter {
    */
   keepAlive?(): Promise<void>;
   dispose?(): Promise<void>;
+  /**
+   * Destroy the sandbox immediately, ignoring the adapter's ownership rules.
+   * Unlike dispose() — which only tears down sandboxes the adapter created —
+   * this is for crash simulation and forced teardown.
+   */
+  kill?(): Promise<void>;
 }
 
 export function assertSuccess(result: RuntimeCommandResult, label: string): void {

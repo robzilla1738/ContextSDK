@@ -261,6 +261,55 @@ export interface RunWithContextOptions extends Omit<StartContextSessionOptions, 
   };
   persistencePolicy?: Partial<ContextPersistencePolicy>;
   runtimeState?: "auto" | "disabled";
+  recovery?: RecoveryOptions;
+  /** Best-effort lifecycle telemetry; a throwing callback is ignored, never fatal. */
+  onSessionEvent?(event: SessionEvent): void;
+}
+
+export type SessionEventType =
+  | "heartbeat-failure"
+  | "degraded"
+  | "emergency-checkpoint"
+  | "recovery-start"
+  | "recovery-success"
+  | "recovery-failure"
+  | "recovery-aborted";
+
+export interface SessionEvent {
+  type: SessionEventType;
+  contextId: ContextId;
+  /** Recovery attempt number (1-based), present on recovery-* events. */
+  attempt?: number;
+  consecutiveFailures?: number;
+  recoveredToGeneration?: number;
+  recoveredToCheckpointGeneration?: number;
+  error?: Error;
+}
+
+export interface RecoveryInfo {
+  attempt: number;
+  generation: number;
+  checkpointGeneration: number;
+  /** True when the manifest's current tree is the latest checkpoint object. */
+  recoveredToCheckpoint: boolean;
+}
+
+export interface RecoveryOptions {
+  /** Opt-in. Recovery is refused for caller-supplied runtimes: the SDK cannot re-provision a sandbox it does not own. */
+  enabled?: boolean;
+  /** Consecutive failed heartbeats (lock renewal or keepAlive) before the session is declared degraded. Default 3. */
+  failureThreshold?: number;
+  /** Re-provision attempts before giving up. Default 1. */
+  maxAttempts?: number;
+  /**
+   * Re-run the session callback against the recovered session. Default false:
+   * the SDK cannot know an arbitrary callback is idempotent, so re-execution
+   * is an explicit caller decision.
+   */
+  reinvoke?: boolean;
+  /** Attempt one best-effort checkpoint when the session degrades, while the sandbox may still be reachable. Default true. */
+  emergencyCheckpoint?: boolean;
+  onRecover?(session: ContextSession, info: RecoveryInfo): Promise<void> | void;
 }
 
 export interface CheckpointContextOptions {

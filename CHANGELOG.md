@@ -4,6 +4,33 @@ All notable changes to the contextSDK packages are documented here. The project
 follows [semver](https://semver.org); while major version is 0, minor releases
 may contain breaking changes, called out explicitly below.
 
+## Unreleased
+
+### Crash detection and recovery
+
+- The session heartbeat now reports lock-renewal and keepAlive outcomes;
+  after `recovery.failureThreshold` consecutive failures (default 3) the
+  session is declared degraded and fires one best-effort emergency checkpoint
+  while the sandbox may still be reachable.
+- New opt-in `recovery` option group on `runWithContext`: when the sandbox
+  dies mid-run, the SDK destroys it, re-provisions through the same
+  provisioner, re-attaches from the latest committed manifest, and (with
+  `reinvoke: true`) re-runs the callback. Recovery is refused for
+  caller-supplied runtimes. New `onSessionEvent` callback surfaces
+  `heartbeat-failure`, `degraded`, `emergency-checkpoint`, and `recovery-*`
+  lifecycle events.
+- `acquireLock` adopts an unexpired lock held by the same owner (refreshing it
+  via CAS) instead of refusing, so a recovering session re-attaches without
+  waiting out its own lock TTL; a failed re-attach no longer force-releases an
+  adopted lock. `acquireLock` now returns `{ lock, adopted }` instead of the
+  bare lock.
+- Adapters expose an optional `kill()` — unconditional sandbox teardown for
+  crash simulation, unlike ownership-checked `dispose()`.
+- `contextsdk run` gains `--recover`; `contextsdk test crash-recovery
+  --execute` now actually crashes a sandbox mid-session and asserts that
+  checkpointed state survives and uncheckpointed state is lost
+  (`--auto-recovery` also exercises the re-provision + reinvoke path).
+
 ## 0.3.0 — 2026-06-05
 
 ### Data integrity

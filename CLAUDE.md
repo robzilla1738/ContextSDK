@@ -55,6 +55,8 @@ Mount-mode decision (shared by attach/save/detach — session callers pass the a
 
 Sandbox lifetimes: provider defaults (~5 minutes) kill agent sessions, so adapters default to E2B 30 min, Vercel 45 min, Modal 60 min. E2B and Vercel implement `keepAlive()`, called by the session heartbeat (same cadence as lock renewal) to extend the countdown while a session runs. Remote pack/unpack/mount/save commands get a 15-minute default timeout (`commandTimeoutMs`).
 
+Crash detection and recovery: the heartbeat reports renew/keepAlive outcomes; after `recovery.failureThreshold` consecutive failures (default 3) the session is degraded and fires one best-effort emergency checkpoint. `recovery` on `runWithContext` is opt-in and **refused for caller-supplied runtimes** — the SDK only re-provisions sandboxes it created. Recovery destroys the dead sandbox, provisions a fresh one, and re-attaches with the **same lock owner** (`acquireLock` adopts an unexpired same-owner lock instead of refusing; a failed re-attach must not release an adopted lock). `reinvoke` defaults to false (callback idempotency is the caller's call); the CLI `run --recover` opts in. Adapters expose optional `kill()` — unconditional teardown for crash simulation, unlike ownership-checked `dispose()`. `contextsdk test crash-recovery --execute` crashes a real sandbox and asserts checkpointed state survives while uncheckpointed state is lost.
+
 E2B:
 
 - Tree contexts (default) use the directory-bundle path — no host ext4 tooling.

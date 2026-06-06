@@ -26,9 +26,11 @@ import type {
   CreateContextOptions,
   DetachContextOptions,
   MountedContext,
+  RecoveryInfo,
   RuntimeStateMetadata,
   RunWithContextOptions,
   SaveContextOptions,
+  SessionEvent,
   StartContextSessionOptions,
 } from "./types.js";
 
@@ -151,7 +153,7 @@ export async function attachContext(options: AttachContextOptions): Promise<Moun
   const mountPath = options.mountPath ?? options.runtime.defaultMountPath?.(options.id) ?? defaultMountPath(options.id);
   const remotePath = remoteImagePath(options.id);
   const remoteTreePath = remoteBundlePath(options.id);
-  await acquireLock({
+  const { adopted } = await acquireLock({
     storage: options.storage,
     contextId: options.id,
     runtimeId: options.runtime.id,
@@ -225,7 +227,11 @@ export async function attachContext(options: AttachContextOptions): Promise<Moun
     };
     return mounted;
   } catch (error) {
-    await releaseLock({ storage: options.storage, contextId: options.id, owner, force: true }).catch(() => undefined);
+    // An adopted lock belongs to a live session that is re-attaching (recovery);
+    // releasing it here would strand that session without exclusivity.
+    if (!adopted) {
+      await releaseLock({ storage: options.storage, contextId: options.id, owner, force: true }).catch(() => undefined);
+    }
     await rm(tempDir, { recursive: true, force: true });
     throw error;
   }
@@ -544,17 +550,167 @@ export async function runWithContext<T>(
   fn: (session: ContextSession) => Promise<T>,
 ): Promise<T> {
   const createdRuntime = !options.runtime;
-  const { runtime } = await provisionContextRuntime(options);
+  const recovery = options.recovery;
+  const failureThreshold = Math.max(1, recovery?.failureThreshold ?? 3);
+  const maxRecoveryAttempts = Math.max(1, recovery?.maxAttempts ?? 1);
+  let { runtime } = await provisionContextRuntime(options);
   const session = await startContextSession({ ...options, runtime });
   let shouldSave = true;
-  const checkpointTimer = startCheckpointTimer(session, options);
-  const lockRenewal = startLockRenewalTimer({
+  let recoveryAttempts = 0;
+
+  // Heartbeat state machine: consecutive renew/keepAlive failures degrade the
+  // session, and degradation fires one best-effort emergency checkpoint while the
+  // sandbox may still be reachable. Re-provisioning never starts from a timer
+  // callback — the recovery driver below runs in the main control flow.
+  const heartbeat = { consecutiveFailures: 0, degraded: false };
+  const onBeat = (beat: { ok: boolean; error?: Error }) => {
+    if (beat.ok) {
+      // A healthy beat ends the degradation: the sandbox answered keepAlive
+      // and the lock renewed. A later relapse may degrade (and emergency-
+      // checkpoint) again — intended for flapping infrastructure.
+      heartbeat.consecutiveFailures = 0;
+      heartbeat.degraded = false;
+      return;
+    }
+    heartbeat.consecutiveFailures += 1;
+    emitSessionEvent(options, { type: "heartbeat-failure", contextId: options.id, consecutiveFailures: heartbeat.consecutiveFailures, error: beat.error });
+    if (heartbeat.consecutiveFailures < failureThreshold || heartbeat.degraded) {
+      return;
+    }
+    heartbeat.degraded = true;
+    emitSessionEvent(options, { type: "degraded", contextId: options.id, consecutiveFailures: heartbeat.consecutiveFailures, error: beat.error });
+    if (recovery?.enabled && recovery.emergencyCheckpoint !== false) {
+      checkpointContextSession(session, {
+        storage: options.storage,
+        encryption: options.encryption,
+        reason: "emergency",
+        persistencePolicy: options.persistencePolicy,
+      }).then(() => {
+        emitSessionEvent(options, { type: "emergency-checkpoint", contextId: options.id });
+      }).catch(() => undefined);
+    }
+  };
+
+  let checkpointTimer = startCheckpointTimer(session, options);
+  let lockRenewal = startLockRenewalTimer({
     storage: options.storage,
     contextId: options.id,
     owner: session.owner,
     lockTtlMs: options.lockTtlMs,
     runtime,
+    onBeat,
   });
+  const startTimers = () => {
+    checkpointTimer = startCheckpointTimer(session, options);
+    lockRenewal = startLockRenewalTimer({
+      storage: options.storage,
+      contextId: options.id,
+      owner: session.owner,
+      lockTtlMs: options.lockTtlMs,
+      runtime,
+      onBeat,
+    });
+  };
+
+  /**
+   * Re-provisions a fresh sandbox and re-attaches the session from the latest
+   * committed manifest. Returns true when fn should be re-invoked. The storage
+   * lock is held by this process the whole way through: re-attach adopts it
+   * (same owner), so no other writer can slip in between sandboxes.
+   */
+  const tryRecover = async (cause: unknown): Promise<boolean> => {
+    if (!recovery?.enabled) {
+      return false;
+    }
+    const reinvoke = Boolean(recovery.reinvoke);
+    if (!createdRuntime || !options.provisioner || !(reinvoke || recovery.onRecover)) {
+      // Caller-supplied runtimes cannot be re-provisioned, and without a
+      // consumer (reinvoke or onRecover) a recovered session would be torn
+      // straight back down — refuse instead of wasting a sandbox.
+      emitSessionEvent(options, { type: "recovery-aborted", contextId: options.id, error: asError(cause) });
+      return false;
+    }
+    // The probe is the ground truth: a degraded heartbeat alone (transient
+    // control-plane hiccups, storage outages) must not destroy a sandbox that
+    // still answers commands — with reinvoke that would replay fn's side effects.
+    if (!await isRuntimeDead(runtime)) {
+      return false; // fn failed on its own; the sandbox is healthy
+    }
+    lockRenewal.stop();
+    // Only the dead runtime's keepAlive must stop — the lock that guards
+    // exclusivity must not lapse while the replacement sandbox is provisioned,
+    // a window that can outlive the remaining TTL. Renew immediately (the lock
+    // may already be near expiry after a renewal outage), then keep renewing
+    // with a lock-only timer until the re-attach adopts it.
+    await renewLock({
+      storage: options.storage,
+      contextId: options.id,
+      owner: session.owner,
+      ttlMs: options.lockTtlMs ?? defaultLockTtlMs,
+    }).catch(() => undefined);
+    const recoveryRenewal = startLockRenewalTimer({
+      storage: options.storage,
+      contextId: options.id,
+      owner: session.owner,
+      lockTtlMs: options.lockTtlMs,
+    });
+    try {
+      while (recoveryAttempts < maxRecoveryAttempts) {
+        const attempt = ++recoveryAttempts;
+        emitSessionEvent(options, { type: "recovery-start", contextId: options.id, attempt });
+        try {
+          // The old sandbox is dead or dying; tear it down best-effort. The
+          // storage lock is deliberately NOT released.
+          await options.provisioner.destroyRuntime?.(runtime).catch(() => undefined);
+          // The superseded attach's temp dir holds decrypted context data.
+          await rm(session.mounted.localTempDir, { recursive: true, force: true }).catch(() => undefined);
+          ({ runtime } = await provisionContextRuntime(options));
+          const mounted = await attachContext({ ...options, runtime, owner: session.owner });
+          rebindSession(session, runtime, mounted);
+          heartbeat.consecutiveFailures = 0;
+          heartbeat.degraded = false;
+          const manifest = await readManifest(options.storage, options.id);
+          const info: RecoveryInfo = {
+            attempt,
+            generation: manifest.generation,
+            checkpointGeneration: manifest.checkpointGeneration ?? 0,
+            recoveredToCheckpoint: Boolean(manifest.latestCheckpoint && manifest.treeKey === manifest.latestCheckpoint.treeKey),
+          };
+          emitSessionEvent(options, {
+            type: "recovery-success",
+            contextId: options.id,
+            attempt,
+            recoveredToGeneration: info.generation,
+            recoveredToCheckpointGeneration: info.checkpointGeneration,
+          });
+          // The recovered session is live from here on; onRecover and the
+          // error-path save can run long, so the full heartbeat must resume
+          // before control leaves the recovery driver. The lock-only timer
+          // stops first so two renewers never race the same lock revision.
+          recoveryRenewal.stop();
+          startTimers();
+          if (recovery.onRecover) {
+            try {
+              await recovery.onRecover(session, info);
+            } catch (callbackError) {
+              // The recovered session is live, but the caller's hook failed;
+              // surface the original error instead of re-running fn blind.
+              emitSessionEvent(options, { type: "recovery-failure", contextId: options.id, attempt, error: asError(callbackError) });
+              return false;
+            }
+          }
+          return reinvoke;
+        } catch (recoveryError) {
+          emitSessionEvent(options, { type: "recovery-failure", contextId: options.id, attempt, error: asError(recoveryError) });
+        }
+      }
+      emitSessionEvent(options, { type: "recovery-aborted", contextId: options.id, attempt: recoveryAttempts, error: asError(cause) });
+      return false;
+    } finally {
+      recoveryRenewal.stop();
+    }
+  };
+
   const signalFinalizer = installSignalFinalizer(async signal => {
     checkpointTimer.stop();
     lockRenewal.stop();
@@ -580,34 +736,44 @@ export async function runWithContext<T>(
     }
   });
   try {
-    const result = await fn(session);
-    checkpointTimer.stop();
-    await saveContextSession(session, {
-      storage: options.storage,
-      encryption: options.encryption,
-      author: options.author,
-      message: options.message ?? "runWithContext save",
-      persistencePolicy: options.persistencePolicy,
-      runtimeState: options.runtimeState,
-    });
-    shouldSave = false;
-    return result;
-  } catch (error) {
-    checkpointTimer.stop();
-    if (options.saveOnError ?? true) {
-      await session.logs.append(`runWithContext failure: ${error instanceof Error ? error.message : String(error)}`).catch(() => undefined);
-      await saveContextSession(session, {
-        storage: options.storage,
-        encryption: options.encryption,
-        author: options.author,
-        message: options.message ?? "runWithContext failure save",
-        persistencePolicy: options.persistencePolicy,
-        runtimeState: options.runtimeState,
-      }).catch(() => undefined);
+    for (;;) {
+      try {
+        const result = await fn(session);
+        checkpointTimer.stop();
+        await saveContextSession(session, {
+          storage: options.storage,
+          encryption: options.encryption,
+          author: options.author,
+          message: options.message ?? "runWithContext save",
+          persistencePolicy: options.persistencePolicy,
+          runtimeState: options.runtimeState,
+        });
+        shouldSave = false;
+        return result;
+      } catch (error) {
+        checkpointTimer.stop();
+        // tryRecover restarts the timers itself the moment the recovered
+        // session is live, so onRecover and the error-path save below are
+        // covered by lock renewal and keepAlive.
+        if (await tryRecover(error)) {
+          continue;
+        }
+        if (options.saveOnError ?? true) {
+          await session.logs.append(`runWithContext failure: ${error instanceof Error ? error.message : String(error)}`).catch(() => undefined);
+          await saveContextSession(session, {
+            storage: options.storage,
+            encryption: options.encryption,
+            author: options.author,
+            message: options.message ?? "runWithContext failure save",
+            persistencePolicy: options.persistencePolicy,
+            runtimeState: options.runtimeState,
+          }).catch(() => undefined);
+        }
+        // saveOnError: false means exactly that — the finally block must not save either.
+        shouldSave = false;
+        throw error;
+      }
     }
-    // saveOnError: false means exactly that — the finally block must not save either.
-    shouldSave = false;
-    throw error;
   } finally {
     checkpointTimer.stop();
     signalFinalizer.dispose();
@@ -640,6 +806,50 @@ export async function runWithContext<T>(
   }
 }
 
+function emitSessionEvent(options: RunWithContextOptions, event: SessionEvent): void {
+  try {
+    options.onSessionEvent?.(event);
+  } catch {
+    // A throwing telemetry callback must never corrupt the session lifecycle.
+  }
+}
+
+function asError(value: unknown): Error {
+  return value instanceof Error ? value : new Error(String(value));
+}
+
+/** Rejects after `ms` when the wrapped promise has not settled; the underlying operation is not cancelled. */
+function withDeadline<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms);
+    timer.unref?.();
+    promise.then(
+      value => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      error => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+/**
+ * Distinguishes "the sandbox died" from "the caller's code failed" after fn
+ * throws: a healthy runtime answers a no-op command, a dead one cannot. Kept
+ * short so a hung sandbox cannot stall the recovery decision.
+ */
+async function isRuntimeDead(runtime: RuntimeAdapter): Promise<boolean> {
+  try {
+    const result = await runtime.run(":", { timeoutMs: 10_000 });
+    return result.exitCode !== 0;
+  } catch {
+    return true;
+  }
+}
+
 export function buildSession(runtime: RuntimeAdapter, mounted: MountedContext): ContextSession {
   const files = new MountedContextFileManager(runtime, mounted.mountPath);
   return {
@@ -654,6 +864,26 @@ export function buildSession(runtime: RuntimeAdapter, mounted: MountedContext): 
     artifacts: createArtifactsApi(files),
     logs: createLogsApi(files),
   };
+}
+
+/**
+ * Rebinds a session to a fresh runtime/mount after recovery — in place, because
+ * the caller's fn and onRecover hold the session object by reference. The file
+ * APIs close over runtime + mountPath and must be rebuilt; swapping `mounted`
+ * also gives the recovered session a fresh withSessionWriteLock queue, so a
+ * save stuck against the dead sandbox cannot block it. The owner is unchanged:
+ * lock continuity across sandboxes is the point.
+ */
+export function rebindSession(session: ContextSession, runtime: RuntimeAdapter, mounted: MountedContext): void {
+  const files = new MountedContextFileManager(runtime, mounted.mountPath);
+  session.runtimeId = mounted.runtimeId;
+  session.mountPath = mounted.mountPath;
+  session.runtime = runtime;
+  session.mounted = mounted;
+  session.files = files;
+  session.memory = createMemoryApi(files);
+  session.artifacts = createArtifactsApi(files);
+  session.logs = createLogsApi(files);
 }
 
 export async function snapshotContextVersion(options: {
@@ -824,35 +1054,56 @@ function startLockRenewalTimer(options: {
   owner: string;
   lockTtlMs?: number;
   runtime?: RuntimeAdapter;
+  /** Reports each heartbeat outcome (lock renewal + keepAlive combined) so callers can detect a dying session. */
+  onBeat?(beat: { ok: boolean; error?: Error }): void;
 }): { stop(): void } {
   const ttlMs = options.lockTtlMs ?? defaultLockTtlMs;
   // Cadence must stay below BOTH the lock TTL and the sandbox lifetime: a large
   // lockTtlMs must not let the keepAlive fire after the sandbox has been auto-killed.
   const sandboxInterval = options.runtime?.sandboxTimeoutMs ? Math.floor(options.runtime.sandboxTimeoutMs / 3) : Infinity;
   const intervalMs = Math.max(Math.min(Math.floor(ttlMs / 3), sandboxInterval), 30_000);
+  // A renewal or keepAlive call that hangs (wedged provider API, dead network)
+  // must still count as a failed beat: an unsettled promise would otherwise
+  // block the beat report forever and blind crash detection.
+  const beatDeadlineMs = Math.min(intervalMs, 30_000);
   let warned = false;
+  let stopped = false;
   const timer = setInterval(() => {
-    renewLock({
+    const renewal = withDeadline(renewLock({
       storage: options.storage,
       contextId: options.contextId,
       owner: options.owner,
       ttlMs,
-    }).catch(error => {
+    }), beatDeadlineMs, `lock renewal for ${options.contextId} timed out`).catch(error => {
       if (!warned) {
         warned = true;
         process.emitWarning(`contextSDK: lock renewal failed for ${options.contextId}: ${error instanceof Error ? error.message : String(error)}`);
       }
+      throw error;
     });
-    options.runtime?.keepAlive?.().catch(error => {
+    const keep = withDeadline(options.runtime?.keepAlive?.() ?? Promise.resolve(), beatDeadlineMs, `runtime keep-alive for ${options.contextId} timed out`).catch(error => {
       if (!warned) {
         warned = true;
         process.emitWarning(`contextSDK: runtime keep-alive failed for ${options.contextId}: ${error instanceof Error ? error.message : String(error)}`);
       }
+      throw error;
+    });
+    void Promise.allSettled([renewal, keep]).then(([renewResult, keepResult]) => {
+      if (stopped || !options.onBeat) {
+        // A beat already in flight when the timer stops must not feed a stale
+        // failure into the next attempt's monitor.
+        return;
+      }
+      const failure = renewResult.status === "rejected"
+        ? renewResult.reason
+        : keepResult.status === "rejected" ? keepResult.reason : undefined;
+      options.onBeat(failure === undefined ? { ok: true } : { ok: false, error: asError(failure) });
     });
   }, intervalMs);
   timer.unref?.();
   return {
     stop() {
+      stopped = true;
       clearInterval(timer);
     },
   };

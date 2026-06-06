@@ -138,6 +138,13 @@ export class E2BAdapter implements RuntimeAdapter {
       await this.sandbox.kill();
     }
   }
+
+  /** Kills the sandbox unconditionally — crash simulation / forced teardown, ownership ignored. */
+  async kill(): Promise<void> {
+    if (typeof this.sandbox.kill === "function") {
+      await this.sandbox.kill();
+    }
+  }
 }
 
 function e2bUser(user: string): Username {

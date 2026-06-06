@@ -171,6 +171,7 @@ await runWithContext({
   provisioner: new E2BProvisioner({ apiKey: process.env.E2B_API_KEY }),
   createIfMissing: true,
   checkpoint: { intervalMs: 300_000 },
+  recovery: { enabled: true, reinvoke: true },
   message: "agent session",
 }, async session => {
   await session.files.write("workspace/task.txt", "current task state\n");
@@ -181,6 +182,16 @@ await runWithContext({
 ```
 
 `runWithContext` checkpoints on the configured interval, renews the single-writer lock, keeps the sandbox alive while the session runs, and saves and cleans up on `SIGINT`/`SIGTERM`. A hard kill can still lose work after the last checkpoint.
+
+### Crash detection and recovery
+
+The session heartbeat reports lock-renewal and keepAlive failures; after `recovery.failureThreshold` consecutive failures (default 3) the session is declared degraded and fires one best-effort emergency checkpoint while the sandbox may still be reachable. With `recovery.enabled`, a sandbox that dies mid-run is replaced: the SDK destroys it, provisions a fresh one through the same provisioner, re-attaches from the latest committed manifest (which includes the newest checkpoint), and — with `reinvoke: true` — re-runs the callback. The storage lock is held by the same owner across sandboxes, so no other writer can slip in during recovery.
+
+- Recovery is opt-in and refused for caller-supplied runtimes: the SDK only re-provisions sandboxes it created.
+- `reinvoke` defaults to `false` because the SDK cannot know an arbitrary callback is idempotent; without it, supply `recovery.onRecover` to use the recovered session before the original error is rethrown.
+- `onSessionEvent` receives `heartbeat-failure`, `degraded`, `emergency-checkpoint`, and `recovery-*` lifecycle events.
+- The CLI equivalent is `contextsdk run --recover`, which re-runs the wrapped command on the recovered sandbox.
+- Adapters expose an optional `kill()` (unconditional teardown, unlike ownership-checked `dispose()`); `contextsdk test crash-recovery <id> --runtime e2b --execute` uses it to crash a real sandbox and assert that checkpointed state survives and uncheckpointed state is lost.
 
 ## How each runtime works
 

@@ -23,6 +23,8 @@ contextsdk run my-agent \
 
 `run` prints the wrapped command's own stdout and stderr and exits with its exit code. Pass `--json` for the machine-readable envelope (`{ ok, result }`). The passthrough is a breaking change from 0.2.0, which always printed JSON.
 
+Pass `--recover` to survive a sandbox dying mid-run: the CLI re-provisions a fresh sandbox, restores the latest committed state (including the newest checkpoint), and re-runs the wrapped command. It needs a provisioner-backed runtime (e2b/vercel/modal without an explicit `--sandbox-id`/sandbox name).
+
 ## Prerequisites
 
 - Node.js >= 20. The packages are ESM-only (`import`; no `require`).

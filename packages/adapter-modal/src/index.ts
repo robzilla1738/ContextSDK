@@ -101,6 +101,11 @@ export class ModalSandboxAdapter implements RuntimeAdapter {
       await this.sandbox.terminate();
     }
   }
+
+  /** Terminates the sandbox unconditionally — crash simulation / forced teardown, ownership ignored. */
+  async kill(): Promise<void> {
+    await this.sandbox.terminate();
+  }
 }
 
 export class ModalProvisioner {

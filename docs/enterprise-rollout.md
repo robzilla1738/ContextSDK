@@ -34,6 +34,7 @@ The important split is portable context versus runtime state. Portable context i
    - Internal Firecracker, EC2, Kubernetes VM sandboxes, and SSH VMs can use the same runtime interface.
    - Provider persistence or snapshots keep heavy runtime state warm when the provider supports it.
    - Adapters default sandbox lifetimes to session-sized timeouts (E2B 30 min, Vercel 45 min, Modal 60 min) instead of the providers' ~5-minute defaults; E2B and Vercel extend the countdown while a session is actively running via the lock-renewal heartbeat.
+   - The heartbeat doubles as crash detection: consecutive renew/keepAlive failures degrade the session and fire a best-effort emergency checkpoint, and opt-in recovery (`recovery: { enabled: true }` on `runWithContext`, `--recover` on the CLI) re-provisions a dead sandbox and re-attaches from the latest committed state under the same lock owner.
 
 4. Policy engine
    - Maps employee identity, department, role, project, data class, runtime, and tool permissions to allowed actions.
@@ -98,12 +99,12 @@ Keep the sandbox temporary. Keep the work. Let provider snapshots handle the mac
 
 Published on npm (install verified 2026-06-05):
 
-- `@contextsdk/core@0.2.0`
-- `@contextsdk/adapter-e2b@0.2.0`
-- `@contextsdk/adapter-vercel@0.2.0`
-- `@contextsdk/adapter-modal@0.2.0`
-- `@contextsdk/cli@0.2.0`
+- `@contextsdk/core@0.3.0`
+- `@contextsdk/adapter-e2b@0.3.0`
+- `@contextsdk/adapter-vercel@0.3.0`
+- `@contextsdk/adapter-modal@0.3.0`
+- `@contextsdk/cli@0.3.0`
 
-The repository tracks `0.3.0` (unreleased). It adds the generation-keyed save commit protocol with manifest compare-and-swap, GCM tag/nonce pinning, the local `FsStorage` default so the CLI runs with zero cloud configuration, e2b SDK v2, session-sized sandbox lifetimes with `keepAlive()` and a 15-minute remote-command timeout, runtime-side archive validation with decompression-bomb caps, Vercel headless auth pass-through, an SSH adapter overhaul, and adapters declaring core as a peer dependency. One CLI breaking change: `contextsdk run` now prints the wrapped command's stdout/stderr and exits with its exit code (`--json` restores the envelope). See `CHANGELOG.md` for the full list.
+The 0.3.0 release adds the generation-keyed save commit protocol with manifest compare-and-swap, GCM tag/nonce pinning, the local `FsStorage` default so the CLI runs with zero cloud configuration, e2b SDK v2, session-sized sandbox lifetimes with `keepAlive()` and a 15-minute remote-command timeout, runtime-side archive validation with decompression-bomb caps, Vercel headless auth pass-through, an SSH adapter overhaul, and adapters declaring core as a peer dependency. One CLI breaking change: `contextsdk run` now prints the wrapped command's stdout/stderr and exits with its exit code (`--json` restores the envelope). See `CHANGELOG.md` for the full list.
 
 The 0.2.0 release hardens lock acquisition with conditional writes, adds lock renewal and save-time ownership checks, records scrypt parameters in encryption metadata, and validates symlink and special-file entries in bundles.
