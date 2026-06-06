@@ -99,12 +99,14 @@ Keep the sandbox temporary. Keep the work. Let provider snapshots handle the mac
 
 Published on npm (install verified 2026-06-05):
 
-- `@contextsdk/core@0.3.0`
-- `@contextsdk/adapter-e2b@0.3.0`
-- `@contextsdk/adapter-vercel@0.3.0`
-- `@contextsdk/adapter-modal@0.3.0`
-- `@contextsdk/cli@0.3.0`
+- `@contextsdk/core@0.4.0`
+- `@contextsdk/adapter-e2b@0.4.0`
+- `@contextsdk/adapter-vercel@0.4.0`
+- `@contextsdk/adapter-modal@0.4.0`
+- `@contextsdk/cli@0.4.0`
 
-The 0.3.0 release adds the generation-keyed save commit protocol with manifest compare-and-swap, GCM tag/nonce pinning, the local `FsStorage` default so the CLI runs with zero cloud configuration, e2b SDK v2, session-sized sandbox lifetimes with `keepAlive()` and a 15-minute remote-command timeout, runtime-side archive validation with decompression-bomb caps, Vercel headless auth pass-through, an SSH adapter overhaul, and adapters declaring core as a peer dependency. One CLI breaking change: `contextsdk run` now prints the wrapped command's stdout/stderr and exits with its exit code (`--json` restores the envelope). See `CHANGELOG.md` for the full list.
+The 0.4.0 release adds crash detection and opt-in session recovery: heartbeat failure reporting with degraded-state emergency checkpoints, automatic re-provision and re-attach under the same lock owner, adapter `kill()`, and CLI `run --recover` (verified live against Modal sandboxes). One API breaking change: `acquireLock` returns `{ lock, adopted }`.
+
+The 0.3.0 release added the generation-keyed save commit protocol with manifest compare-and-swap, GCM tag/nonce pinning, the local `FsStorage` default so the CLI runs with zero cloud configuration, e2b SDK v2, session-sized sandbox lifetimes with `keepAlive()` and a 15-minute remote-command timeout, runtime-side archive validation with decompression-bomb caps, Vercel headless auth pass-through, an SSH adapter overhaul, and adapters declaring core as a peer dependency. One CLI breaking change: `contextsdk run` now prints the wrapped command's stdout/stderr and exits with its exit code (`--json` restores the envelope). See `CHANGELOG.md` for the full list.
 
 The 0.2.0 release hardens lock acquisition with conditional writes, adds lock renewal and save-time ownership checks, records scrypt parameters in encryption metadata, and validates symlink and special-file entries in bundles.

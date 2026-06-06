@@ -92,15 +92,15 @@ SSH:
 
 Published on npm (install verified on 2026-06-05 via `npm install` in a clean directory):
 
-- `@contextsdk/core@0.3.0`
-- `@contextsdk/adapter-e2b@0.3.0`
-- `@contextsdk/adapter-vercel@0.3.0`
-- `@contextsdk/adapter-modal@0.3.0`
-- `@contextsdk/cli@0.3.0`
+- `@contextsdk/core@0.4.0`
+- `@contextsdk/adapter-e2b@0.4.0`
+- `@contextsdk/adapter-vercel@0.4.0`
+- `@contextsdk/adapter-modal@0.4.0`
+- `@contextsdk/cli@0.4.0`
 
-0.3.0 (tagged `v0.3.0`) is the current release. See `CHANGELOG.md` for the full list: generation-keyed save commit protocol with manifest CAS, GCM tag/nonce pinning, e2b SDK v2, sandbox lifetime defaults + keepAlive, E2B transfer retries, runtime-side archive validation with bomb caps, local `FsStorage` default for the CLI, SSH adapter overhaul, adapters declaring core as a peer dependency, and a CLI breaking change (`run` output).
+0.4.0 (tagged `v0.4.0`) is the current release. See `CHANGELOG.md` for the full list: heartbeat failure detection with degraded-state emergency checkpoints, opt-in session recovery on `runWithContext` (re-provision + same-owner lock adoption + optional reinvoke), adapter `kill()`, CLI `run --recover`, a real `test crash-recovery` scenario, and one API breaking change (`acquireLock` returns `{ lock, adopted }`).
 
-Compatibility: 0.3.0 reads contexts written by 0.1.0/0.2.0 (legacy fixed `current.*` keys migrate on next save), and 0.2.0 can read contexts saved by 0.3.0. Bundles encrypted with the 0.2.0+ default scrypt parameters cannot be decrypted by 0.1.0.
+Compatibility: 0.4.0 uses the same storage layout and commit protocol as 0.3.0 (contexts are interchangeable between the two). 0.3.0/0.4.0 read contexts written by 0.1.0/0.2.0 (legacy fixed `current.*` keys migrate on next save), and 0.2.0 can read contexts saved by 0.3.0/0.4.0. Bundles encrypted with the 0.2.0+ default scrypt parameters cannot be decrypted by 0.1.0.
 
 ## Commands
 
